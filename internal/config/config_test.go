@@ -19,6 +19,7 @@ func TestLoadDefaultsAndEnv(t *testing.T) {
 	t.Setenv("SITEINFO_FIRECRAWL_MAX_CONCURRENCY", "7")
 	t.Setenv("SITEINFO_PROTECT_IP_RATE", "12.5")
 	t.Setenv("SITEINFO_LOG_LEVEL", "warn")
+	t.Setenv("SITEINFO_FIRECRAWL_LANGUAGES", "de, en")
 	t.Setenv("SITEINFO_LOG_SAMPLING_THEREAFTER", "20")
 	t.Setenv("SITEINFO_SERVER_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.0.0/16")
 	t.Setenv("SITEINFO_OTEL_ENDPOINT", "http://collector:4318")
@@ -41,6 +42,9 @@ func TestLoadDefaultsAndEnv(t *testing.T) {
 	}
 	if cfg.Firecrawl.MaxConcurrency != 7 {
 		t.Errorf("max concurrency = %d", cfg.Firecrawl.MaxConcurrency)
+	}
+	if cfg.Firecrawl.Country != "DE" || len(cfg.Firecrawl.Languages) != 2 || cfg.Firecrawl.Languages[1] != "en" {
+		t.Errorf("firecrawl location = %q %q", cfg.Firecrawl.Country, cfg.Firecrawl.Languages)
 	}
 	if cfg.Log.Level != "warn" || cfg.Log.SamplingInitial != 100 || cfg.Log.SamplingThereafter != 20 {
 		t.Errorf("log = %+v", cfg.Log)
@@ -102,6 +106,8 @@ func TestValidate(t *testing.T) {
 		{"no api key for self-hosted", func(c *Config) { c.Firecrawl.APIKey = ""; c.Firecrawl.APIURL = "http://fc:3002" }, ""},
 		{"sampling off", func(c *Config) { c.Log.SamplingInitial, c.Log.SamplingThereafter = 0, 0 }, ""},
 		{"sampling needs thereafter", func(c *Config) { c.Log.SamplingThereafter = 0 }, "sampling_thereafter"},
+		{"country off", func(c *Config) { c.Firecrawl.Country = "" }, ""},
+		{"bad country", func(c *Config) { c.Firecrawl.Country = "de" }, "firecrawl.country"},
 		{"bad cidr", func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/8", "nope"} }, "trusted_proxies"},
 		{"good cidr", func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/8", "fd00::/8"} }, ""},
 		{"burst missing", func(c *Config) { c.Protect.IPRate, c.Protect.IPBurst = 5, 0 }, "ip_burst"},

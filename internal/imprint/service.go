@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"go.uber.org/zap"
+	"golang.org/x/net/publicsuffix"
 
 	"github.com/OWNER/siteinfo/internal/crawler"
 	"github.com/OWNER/siteinfo/internal/observability"
@@ -52,7 +53,49 @@ func NewService(scraper Scraper, extractor Extractor, opts ...Option) *Service {
 
 // Lookup finds the imprint of host (normalized, no scheme). It returns
 // ErrNotFound when no page qualifies; crawler errors are passed through.
+//
+// If the host itself has no imprint and is a subdomain (a shop on eu.store.example.com,
+// whose legal pages live on example.com), the registrable parent domain is searched too.
+// That costs extra upstream calls, so the parent is only searched through its homepage
+// links, not through the well-known paths, and the result carries a warning.
 func (s *Service) Lookup(ctx context.Context, host string) (*Imprint, error) {
+	imp, err := s.lookupHost(ctx, host, nil, true)
+	if !errors.Is(err, ErrNotFound) {
+		return imp, err
+	}
+	parent, ok := parentDomain(host)
+	if !ok {
+		return nil, err
+	}
+	tr := observability.TraceFrom(ctx)
+	tr.Add("imprint", "no imprint on this host, searching the parent domain", "parent", parent)
+	imp, perr := s.lookupHost(ctx, parent, []string{host}, false)
+	switch {
+	case perr == nil:
+		imp.Warnings = append(imp.Warnings, fmt.Sprintf("imprint taken from the parent domain %s; %s has none of its own", parent, host))
+		return imp, nil
+	case errors.Is(perr, ErrNotFound), errors.Is(perr, crawler.ErrUpstream) && !hardFailure(perr):
+		tr.Add("imprint", "parent domain has no imprint either", "parent", parent, "error", perr)
+		return nil, err // the original not-found outcome stands
+	default:
+		return nil, perr // timeout, rate limit, cancellation
+	}
+}
+
+// parentDomain returns the registrable domain of host (eTLD+1) when it differs from host.
+// Private suffixes such as myshopify.com or blogspot.com count as public suffixes, so a
+// shop hosted there never falls back to the hoster's own imprint.
+func parentDomain(host string) (string, bool) {
+	p, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil || p == host {
+		return "", false
+	}
+	return p, true
+}
+
+// lookupHost runs discovery on one host: homepage links first, then (if probes is set)
+// the well-known paths. extraHosts are additional names considered the same website.
+func (s *Service) lookupHost(ctx context.Context, host string, extraHosts []string, probes bool) (*Imprint, error) {
 	homepage := "https://" + host + "/"
 
 	home, err := s.scraper.Scrape(ctx, homepage, crawler.ScrapeRequest{Markdown: true, Links: true, FullPage: true})
@@ -67,7 +110,7 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Imprint, error) {
 	if err != nil || base.Hostname() == "" {
 		base, _ = url.Parse(homepage)
 	}
-	hosts := []string{host, base.Hostname()}
+	hosts := append([]string{host, base.Hostname()}, extraHosts...)
 
 	tr := observability.TraceFrom(ctx)
 	links := MergeLinks(home.Links, home.Markdown)
@@ -108,6 +151,9 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Imprint, error) {
 		}
 	}
 	for _, p := range fallbackPaths {
+		if !probes {
+			break
+		}
 		c := Candidate{URL: "https://" + host + p}
 		if tried[c.URL] {
 			continue

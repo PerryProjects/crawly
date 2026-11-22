@@ -75,6 +75,7 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 		crawler.WithMaxConcurrency(cfg.Firecrawl.MaxConcurrency),
 		crawler.WithMaxRetries(cfg.Firecrawl.MaxRetries),
 		crawler.WithBackoff(cfg.Firecrawl.BackoffBase),
+		crawler.WithLocation(cfg.Firecrawl.Country, cfg.Firecrawl.Languages),
 		crawler.WithLogger(log),
 		crawler.WithObserver(m),
 	)

@@ -28,8 +28,11 @@ type Extractor interface {
 	Extract(ctx context.Context, pageURL string) (Extraction, error)
 }
 
-// FirecrawlExtractor extracts with a single Firecrawl scrape: markdown plus
-// LLM based JSON extraction against a fixed schema.
+// FirecrawlExtractor reads a candidate page in two steps. Step 1 fetches only the markdown,
+// which is cheap and fast, and checks that the page really is an imprint (success status,
+// imprint marker words). Only then step 2 asks Firecrawl for the LLM based JSON extraction.
+// Probing a wrong candidate (a 404, a soft 404) therefore costs one fast call instead of a slow,
+// credit-consuming extraction; measured live, extraction on a 404 page took about 8 s.
 type FirecrawlExtractor struct{ scraper Scraper }
 
 // NewFirecrawlExtractor returns an Extractor backed by scraper.
@@ -39,15 +42,23 @@ func NewFirecrawlExtractor(scraper Scraper) *FirecrawlExtractor {
 
 // Extract implements Extractor.
 func (e *FirecrawlExtractor) Extract(ctx context.Context, pageURL string) (Extraction, error) {
-	page, err := e.scraper.Scrape(ctx, pageURL, crawler.ScrapeRequest{
-		Markdown: true,
-		FullPage: true, // the legal text is the point; do not let a main-content heuristic cut it
-		JSON:     &crawler.JSONExtract{Prompt: extractionPrompt, Schema: extractionSchema()},
-	})
+	// FullPage: the legal text is the point; do not let a main-content heuristic cut it.
+	page, err := e.scraper.Scrape(ctx, pageURL, crawler.ScrapeRequest{Markdown: true, FullPage: true})
 	if err != nil {
 		return Extraction{}, fmt.Errorf("imprint: scrape %s: %w", pageURL, err)
 	}
 	x := Extraction{URL: page.URL, StatusCode: page.StatusCode, Text: page.Markdown}
+	if unusableReason(x) != "" {
+		return x, nil // the service rejects it with the same reason; no extraction is paid for
+	}
+
+	page, err = e.scraper.Scrape(ctx, pageURL, crawler.ScrapeRequest{
+		FullPage: true,
+		JSON:     &crawler.JSONExtract{Prompt: extractionPrompt, Schema: extractionSchema()},
+	})
+	if err != nil {
+		return Extraction{}, fmt.Errorf("imprint: extract %s: %w", pageURL, err)
+	}
 	if page.JSON == nil {
 		x.Warnings = append(x.Warnings, "structured extraction returned no data")
 		return x, nil

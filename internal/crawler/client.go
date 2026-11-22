@@ -40,6 +40,8 @@ type Client struct {
 	sem         chan struct{}
 	timeout     time.Duration
 	maxRetries  int
+	country     string
+	languages   []string
 	backoffBase time.Duration
 	maxBackoff  time.Duration
 	log         *zap.SugaredLogger
@@ -63,6 +65,14 @@ func WithMaxRetries(n int) Option { return func(c *Client) { c.maxRetries = max(
 
 // WithBackoff sets the base delay of the exponential backoff (default 500ms).
 func WithBackoff(base time.Duration) Option { return func(c *Client) { c.backoffBase = base } }
+
+// WithLocation makes Firecrawl fetch from the given country (ISO 3166 alpha-2) and ask for the
+// given languages. Sites that redirect or localize by visitor geography (an EU store that sends
+// US visitors to the US store, a footer that only links the imprint in the German version)
+// otherwise answer with the wrong variant. Empty country disables it.
+func WithLocation(country string, languages []string) Option {
+	return func(c *Client) { c.country, c.languages = country, languages }
+}
 
 // WithLogger sets the logger.
 func WithLogger(l *zap.Logger) Option { return func(c *Client) { c.log = l.Sugar() } }
@@ -190,6 +200,9 @@ func (c *Client) options(req ScrapeRequest) *firecrawl.ScrapeOptions {
 	}
 	if req.JSON != nil {
 		opts.JsonOptions = &firecrawl.JsonOptions{Prompt: req.JSON.Prompt, Schema: req.JSON.Schema}
+	}
+	if c.country != "" {
+		opts.Location = &firecrawl.LocationConfig{Country: c.country, Languages: c.languages}
 	}
 	// Let Firecrawl give up slightly before our own per-call timeout fires.
 	opts.Timeout = firecrawl.Int(max(int(c.timeout.Milliseconds())*9/10, 1000))

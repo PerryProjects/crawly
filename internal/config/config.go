@@ -118,8 +118,12 @@ type RedisConfig struct {
 
 // FirecrawlConfig configures the upstream crawler.
 type FirecrawlConfig struct {
-	APIKey         string        `mapstructure:"api_key"`
-	APIURL         string        `mapstructure:"api_url"`
+	APIKey string `mapstructure:"api_key"`
+	APIURL string `mapstructure:"api_url"`
+	// Country (ISO 3166 alpha-2, empty = off) and Languages are sent as Firecrawl's `location`, so
+	// geo-dependent sites answer with their DACH variant. See crawler.WithLocation.
+	Country        string        `mapstructure:"country"`
+	Languages      []string      `mapstructure:"languages"`
 	Timeout        time.Duration `mapstructure:"timeout"`
 	MaxConcurrency int           `mapstructure:"max_concurrency"`
 	MaxRetries     int           `mapstructure:"max_retries"`
@@ -186,6 +190,8 @@ func Default() Config {
 		},
 		Firecrawl: FirecrawlConfig{
 			APIURL:         "https://api.firecrawl.dev",
+			Country:        "DE",
+			Languages:      []string{"de"},
 			Timeout:        30 * time.Second,
 			MaxConcurrency: 4,
 			MaxRetries:     2,
@@ -238,6 +244,7 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.Auth.Tokens = cleanList(cfg.Auth.Tokens)
 	cfg.Redis.Addrs = cleanList(cfg.Redis.Addrs)
+	cfg.Firecrawl.Languages = cleanList(cfg.Firecrawl.Languages)
 	cfg.Server.TrustedProxies = cleanList(cfg.Server.TrustedProxies)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -319,6 +326,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Firecrawl.APIKey == "" && c.Firecrawl.APIURL == Default().Firecrawl.APIURL {
 		add("firecrawl.api_key is required for the Firecrawl cloud API (a self-hosted firecrawl.api_url may run without)")
+	}
+	if cc := c.Firecrawl.Country; cc != "" && (len(cc) != 2 || strings.ToUpper(cc) != cc) {
+		add("firecrawl.country must be empty or an upper-case ISO 3166 alpha-2 code like DE, got %q", cc)
 	}
 	if c.Firecrawl.MaxConcurrency < 1 {
 		add("firecrawl.max_concurrency must be >= 1")

@@ -123,8 +123,13 @@ consumed when the refresh starts, so a failed refresh also starts the cooldown (
    `/legal-notice`). A page counts only if it returned a success status and contains an imprint marker word
    (rejects soft-404 pages). Nothing found → status `not_found` (404, negative-cached).
    A timeout/rate limit/cancellation aborts the lookup instead of being mistaken for "not found".
-4. Scrape the chosen page: `markdown` (kept verbatim as `text`) plus Firecrawl JSON extraction with a nullable
-   schema and an explicit "never guess, use null" prompt, behind the `imprint.Extractor` interface.
+   **Parent domain:** if the host has no imprint and is a subdomain (`eu.store.bambulab.com`), the registrable parent
+   (`bambulab.com`, via the public suffix list; `myshopify.com`-style hosters are excluded) is searched through its
+   homepage links, and the result carries a warning that the imprint comes from the parent.
+4. Read the chosen page in two steps, behind the `imprint.Extractor` interface: first only the markdown (cheap, ~0.2 s)
+   to check it really is an imprint; only an accepted page then gets the Firecrawl JSON extraction (nullable schema,
+   "never guess, use null" prompt, ~4–8 s and extra credits). The markdown is kept verbatim as `text`. This way a wrong
+   candidate (404, soft 404) costs one fast call instead of a full extraction.
 5. Fields (all nullable): `company_name`, `legal_form`, `represented_by[]`, `address{street, postal_code, city,
    country}`, `contact{email, phone, fax}`, `register{type, court, number}`, `vat_id`, `supervisory_authority`,
    `responsible_for_content`, `country` (DE/AT/CH). Placeholder answers (`""`, `null`, `n/a`, `-`) become `null`;
@@ -253,6 +258,7 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | `redis.pool_size` | `SITEINFO_REDIS_POOL_SIZE` | `20` | |
 | `firecrawl.api_key` | `SITEINFO_FIRECRAWL_API_KEY` | – | required for the cloud API, optional for a self-hosted `api_url` |
 | `firecrawl.api_url` | `SITEINFO_FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | |
+| `firecrawl.country` / `languages` | `SITEINFO_FIRECRAWL_COUNTRY` / `…_LANGUAGES` | `DE` / `de` | Firecrawl `location`: fetch as a visitor from this country (upper-case ISO code, empty = off) and ask for these languages. Geo-dependent sites otherwise serve the wrong variant, see below |
 | `firecrawl.timeout` | `…_TIMEOUT` | `30s` | per call |
 | `firecrawl.max_concurrency` | `…_MAX_CONCURRENCY` | `4` | per pod |
 | `firecrawl.max_retries` | `…_MAX_RETRIES` | `2` | on 429/5xx/transport errors |
@@ -437,8 +443,14 @@ turns them on.
 - **Personal data.** Imprints of sole proprietors contain personal data (names, addresses, phone numbers). They
   live in Redis for up to the TTL (30 days) and are returned to callers; apply your own retention and legal basis.
   Logs contain the host, not the data.
-- **Imprint budget.** One imprint load can need up to 6 Firecrawl calls (homepage, 2 linked candidates, up to 3
-  probes), all inside the 40 s load budget; slow sites may end as 504 (not cached).
+- **Imprint budget.** A load runs inside the 40 s load budget. Worst case (subdomain without imprint): homepage, 2 linked
+  candidates, 3 probes, then the parent's homepage and 2 candidates; every candidate is one fast markdown call and only the
+  accepted page gets the slow extraction. Slow sites may still end as 504 (not cached).
+- **Geo-dependent sites.** Firecrawl's default location is the US. Live example: `eu.store.bambulab.com` redirects US
+  visitors to `us.store.bambulab.com`, and `bambulab.com` only shows its German footer (with the "Impressum" link) to visitors
+  from Germany; before `firecrawl.country=DE` the imprint was not found, now it is (via the parent domain). The DE default is
+  right for DACH, but a Swiss or Austrian site that only serves its own country could need a different value (one
+  country per deployment; per-request country is not implemented).
 - **Rate limits and `Retry-After`.** The SDK does not expose `Retry-After`; a transport wrapper captures it. A
   `Retry-After` longer than the remaining budget is not waited for.
 - **TTL rationale.** 30 days: imprints and brand identity change rarely and every miss costs Firecrawl credits;

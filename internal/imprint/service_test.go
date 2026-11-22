@@ -18,12 +18,14 @@ type fakeSite struct {
 	pages map[string]*crawler.Page
 	errs  map[string]error
 	calls []string
+	reqs  []crawler.ScrapeRequest
 }
 
-func (f *fakeSite) Scrape(_ context.Context, url string, _ crawler.ScrapeRequest) (*crawler.Page, error) {
+func (f *fakeSite) Scrape(_ context.Context, url string, req crawler.ScrapeRequest) (*crawler.Page, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, url)
+	f.reqs = append(f.reqs, req)
 	if err := f.errs[url]; err != nil {
 		return nil, err
 	}
@@ -68,8 +70,9 @@ func TestLookupFollowsLinkedImprint(t *testing.T) {
 	if len(imp.Warnings) != 0 || imp.Warnings == nil {
 		t.Fatalf("warnings = %#v, want empty non-nil", imp.Warnings)
 	}
-	if len(site.calls) != 2 {
-		t.Fatalf("calls = %v (privacy page must not be scraped)", site.calls)
+	// homepage, then the imprint page twice (markdown probe, then JSON extraction); never the privacy page.
+	if want := []string{"https://acme.de/", "https://www.acme.de/rechtliches/impressum", "https://www.acme.de/rechtliches/impressum"}; !slices.Equal(site.calls, want) {
+		t.Fatalf("calls = %v", site.calls)
 	}
 }
 
@@ -85,7 +88,7 @@ func TestLookupFallsBackToWellKnownPaths(t *testing.T) {
 	if imp.ImprintURL != "https://acme.de/imprint" {
 		t.Fatalf("url = %s", imp.ImprintURL)
 	}
-	want := []string{"https://acme.de/", "https://acme.de/impressum", "https://acme.de/imprint"}
+	want := []string{"https://acme.de/", "https://acme.de/impressum", "https://acme.de/imprint", "https://acme.de/imprint"}
 	if !slices.Equal(site.calls, want) {
 		t.Fatalf("calls = %v, want %v", site.calls, want)
 	}
@@ -198,5 +201,129 @@ func TestLookupWarnsAboutHallucinatedValues(t *testing.T) {
 	}
 	if !strings.Contains(imp.Text, "DE123456789") {
 		t.Fatal("raw text must stay untouched")
+	}
+}
+
+func TestParentDomain(t *testing.T) {
+	for host, want := range map[string]string{
+		"eu.store.bambulab.com":         "bambulab.com",
+		"shop.example.de":               "example.de",
+		"a.b.c.example.co.uk":           "example.co.uk",
+		"example.de":                    "",
+		"example.co.uk":                 "",
+		"shop.myshopify.com":            "", // private suffix: never fall back to the hoster
+		"user.blogspot.com":             "",
+		"xn--bcher-kva.shop.example.at": "example.at",
+	} {
+		got, ok := parentDomain(host)
+		if got != want || ok != (want != "") {
+			t.Errorf("parentDomain(%q) = %q, %v; want %q", host, got, ok, want)
+		}
+	}
+}
+
+func TestLookupFallsBackToParentDomain(t *testing.T) {
+	site := &fakeSite{pages: map[string]*crawler.Page{
+		"https://eu.store.acme.de/":                     {URL: "https://eu.store.acme.de/", Markdown: "store without legal links"},
+		"https://acme.de/":                              {URL: "https://acme.de/de-de", Markdown: "[Impressum](https://acme.de/de-de/policies/page/impressum)", Links: []string{"https://acme.de/de-de/policies/page/impressum"}},
+		"https://acme.de/de-de/policies/page/impressum": imprintPage("https://acme.de/de-de/policies/page/impressum"),
+	}}
+	imp, err := newSvc(site).Lookup(context.Background(), "eu.store.acme.de")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imp.ImprintURL != "https://acme.de/de-de/policies/page/impressum" {
+		t.Fatalf("url = %s", imp.ImprintURL)
+	}
+	if !hasWarning(imp.Warnings, "taken from the parent domain acme.de") || hasWarning(imp.Warnings, "different host") {
+		t.Fatalf("warnings = %v", imp.Warnings)
+	}
+	want := []string{
+		"https://eu.store.acme.de/", "https://eu.store.acme.de/impressum", "https://eu.store.acme.de/imprint", "https://eu.store.acme.de/legal-notice",
+		"https://acme.de/", "https://acme.de/de-de/policies/page/impressum", "https://acme.de/de-de/policies/page/impressum",
+	}
+	if !slices.Equal(site.calls, want) {
+		t.Fatalf("calls = %v\nwant    %v", site.calls, want)
+	}
+}
+
+func TestParentDomainDoesNotProbeWellKnownPaths(t *testing.T) {
+	site := &fakeSite{pages: map[string]*crawler.Page{
+		"https://eu.store.acme.de/": {URL: "https://eu.store.acme.de/"},
+		"https://acme.de/":          {URL: "https://acme.de/", Markdown: "nothing relevant"},
+		"https://acme.de/impressum": imprintPage("https://acme.de/impressum"), // exists, but is not probed
+	}}
+	if _, err := newSvc(site).Lookup(context.Background(), "eu.store.acme.de"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(site.calls) != 5 { // host homepage + 3 probes + parent homepage
+		t.Fatalf("calls = %v", site.calls)
+	}
+}
+
+func TestParentDomainFailuresKeepNotFound(t *testing.T) {
+	base := func() *fakeSite {
+		return &fakeSite{pages: map[string]*crawler.Page{"https://eu.store.acme.de/": {URL: "https://eu.store.acme.de/"}}, errs: map[string]error{}}
+	}
+	t.Run("parent site down is still not found", func(t *testing.T) {
+		s := base()
+		s.errs["https://acme.de/"] = crawler.ErrUpstream
+		if _, err := newSvc(s).Lookup(context.Background(), "eu.store.acme.de"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	for name, cause := range map[string]error{"timeout": crawler.ErrUpstreamTimeout, "rate limit": crawler.ErrRateLimited, "canceled": context.Canceled} {
+		t.Run("parent "+name+" aborts", func(t *testing.T) {
+			s := base()
+			s.errs["https://acme.de/"] = cause
+			if _, err := newSvc(s).Lookup(context.Background(), "eu.store.acme.de"); !errors.Is(err, cause) || errors.Is(err, ErrNotFound) {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestNoParentFallbackForHostedSubdomains(t *testing.T) {
+	for _, host := range []string{"acme.de", "peters-shop.myshopify.com", "acme.blogspot.com"} {
+		site := &fakeSite{pages: map[string]*crawler.Page{"https://" + host + "/": {URL: "https://" + host + "/"}}}
+		if _, err := newSvc(site).Lookup(context.Background(), host); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%s: err = %v", host, err)
+		}
+		if len(site.calls) != 4 {
+			t.Errorf("%s: calls = %v, want homepage plus 3 probes only", host, site.calls)
+		}
+	}
+}
+
+// The expensive LLM extraction must only run for pages that passed the cheap markdown check.
+func TestExtractionOnlyRunsForAcceptedPages(t *testing.T) {
+	site := &fakeSite{pages: map[string]*crawler.Page{
+		"https://acme.de/":             {URL: "https://acme.de/"},
+		"https://acme.de/impressum":    {URL: "https://acme.de/impressum", StatusCode: 404, Markdown: "Impressum 404"},
+		"https://acme.de/imprint":      {URL: "https://acme.de/imprint", StatusCode: 200, Markdown: "# Willkommen\nkeine Rechtstexte"}, // soft 404
+		"https://acme.de/legal-notice": imprintPage("https://acme.de/legal-notice"),
+	}}
+	if _, err := newSvc(site).Lookup(context.Background(), "acme.de"); err != nil {
+		t.Fatal(err)
+	}
+	jsonCalls := map[string]int{}
+	for i, req := range site.reqs {
+		if req.JSON != nil {
+			jsonCalls[site.calls[i]]++
+			if req.Markdown {
+				t.Errorf("the extraction call does not need the markdown again: %+v", req)
+			}
+		}
+	}
+	if len(jsonCalls) != 1 || jsonCalls["https://acme.de/legal-notice"] != 1 {
+		t.Fatalf("JSON extraction ran for %v, want only the accepted page, once", jsonCalls)
+	}
+	// 404 and soft 404 cost exactly one (markdown) call each.
+	count := map[string]int{}
+	for _, u := range site.calls {
+		count[u]++
+	}
+	if count["https://acme.de/impressum"] != 1 || count["https://acme.de/imprint"] != 1 || count["https://acme.de/legal-notice"] != 2 {
+		t.Fatalf("calls per URL = %v", count)
 	}
 }

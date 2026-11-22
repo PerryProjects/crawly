@@ -282,7 +282,7 @@ func TestSDKRequestShape(t *testing.T) {
 		_ = json.Unmarshal(b, &body)
 		_, _ = io.WriteString(w, `{"success":true,"data":{"markdown":"# Impressum","links":["https://example.de/impressum"],`+
 			`"json":{"company_name":"ACME GmbH"},"metadata":{"statusCode":200}}}`)
-	})
+	}, WithLocation("DE", []string{"de"}))
 	page, err := c.Scrape(context.Background(), "https://example.de/", ScrapeRequest{
 		Markdown: true, Links: true, Branding: true, FullPage: true,
 		JSON: &JSONExtract{Prompt: "extract", Schema: map[string]any{"type": "object"}},
@@ -309,6 +309,10 @@ func TestSDKRequestShape(t *testing.T) {
 	}
 	if body["timeout"] == nil {
 		t.Error("firecrawl timeout missing")
+	}
+	loc, _ := body["location"].(map[string]any)
+	if langs, _ := loc["languages"].([]any); loc["country"] != "DE" || len(langs) != 1 || langs[0] != "de" {
+		t.Errorf("location = %v", body["location"])
 	}
 }
 
@@ -364,5 +368,20 @@ func TestSDK5xxBecomesErrUpstream(t *testing.T) {
 func TestErrorCode(t *testing.T) {
 	if ErrorCode(ErrRateLimited) != CodeRateLimited || ErrorCode(ErrUpstream) != CodeUpstream || ErrorCode(errors.New("x")) != "" {
 		t.Fatal("codes")
+	}
+}
+
+func TestNoLocationByDefault(t *testing.T) {
+	var body map[string]any
+	c := newSDKClient(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		_, _ = io.WriteString(w, `{"success":true,"data":{"markdown":"x"}}`)
+	})
+	if _, err := c.Scrape(context.Background(), "https://example.de/", ScrapeRequest{Markdown: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["location"]; ok {
+		t.Errorf("location must be absent unless configured: %v", body["location"])
 	}
 }
