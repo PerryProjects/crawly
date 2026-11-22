@@ -83,7 +83,19 @@ type Page struct {
 	Metadata   map[string]any
 }
 
-// Crawler fetches one page. The Firecrawl implementation is *Client; tests use fakes.
-type Crawler interface {
+// MapLink is a URL found by Map, with its page title.
+type MapLink struct {
+	URL   string
+	Title string
+}
+
+// PageScraper fetches one page.
+type PageScraper interface {
 	Scrape(ctx context.Context, url string, req ScrapeRequest) (*Page, error)
+}
+
+// Crawler fetches pages and lists a site's URLs. The Firecrawl implementation is *Client; tests use mocks.
+type Crawler interface {
+	PageScraper
+	Map(ctx context.Context, siteURL, search string, limit int) ([]MapLink, error)
 }

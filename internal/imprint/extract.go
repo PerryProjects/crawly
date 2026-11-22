@@ -12,6 +12,7 @@ import (
 // Scraper is what this package needs from the crawler.
 type Scraper interface {
 	Scrape(ctx context.Context, url string, req crawler.ScrapeRequest) (*crawler.Page, error)
+	Map(ctx context.Context, siteURL, search string, limit int) ([]crawler.MapLink, error)
 }
 
 // Extraction is the raw outcome of reading one imprint page.
@@ -34,6 +35,9 @@ type Extractor interface {
 type ExtractOptions struct {
 	// RenderWait gives client-side rendered pages time to load their content.
 	RenderWait time.Duration
+	// Combined fetches markdown and the LLM extraction in one call. Cheaper when the page is
+	// very likely the imprint (5 credits instead of 1 + 5); costlier when it is not (5 instead of 1).
+	Combined bool
 }
 
 // FirecrawlExtractor reads a candidate page in two steps. Step 1 fetches only the markdown,
@@ -50,6 +54,26 @@ func NewFirecrawlExtractor(scraper Scraper) *FirecrawlExtractor {
 
 // Extract implements Extractor.
 func (e *FirecrawlExtractor) Extract(ctx context.Context, pageURL string, opt ExtractOptions) (Extraction, error) {
+	if opt.Combined {
+		page, err := e.scraper.Scrape(ctx, pageURL, crawler.ScrapeRequest{
+			Markdown: true, FullPage: true, WaitFor: opt.RenderWait,
+			JSON: &crawler.JSONExtract{Prompt: extractionPrompt, Schema: extractionSchema()},
+		})
+		if err != nil {
+			return Extraction{}, fmt.Errorf("imprint: scrape %s: %w", pageURL, err)
+		}
+		x := Extraction{URL: page.URL, StatusCode: page.StatusCode, Text: page.Markdown}
+		if unusableReason(x) != "" {
+			return x, nil
+		}
+		if page.JSON == nil {
+			x.Warnings = append(x.Warnings, Warning{Code: WarnExtractionUnavailable, Message: "structured extraction returned no data"})
+			return x, nil
+		}
+		x.Fields = FieldsFromMap(page.JSON)
+		return x, nil
+	}
+
 	// FullPage: the legal text is the point; do not let a main-content heuristic cut it.
 	page, err := e.scraper.Scrape(ctx, pageURL, crawler.ScrapeRequest{Markdown: true, FullPage: true, WaitFor: opt.RenderWait})
 	if err != nil {

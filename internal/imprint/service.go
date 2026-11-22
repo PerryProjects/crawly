@@ -138,7 +138,9 @@ func (s *Service) lookupHost(ctx context.Context, host string, extraHosts []stri
 	}
 	try := func(c Candidate, linked bool) (*Imprint, error) {
 		mark(c.URL)
-		x, err := s.extractor.Extract(ctx, c.URL, ExtractOptions{})
+		// A same-host link whose path names the imprint is almost always right (67 of 67 in the
+		// live sweep), so markdown and extraction come in one call: 5 credits instead of 1 + 5.
+		x, err := s.extractor.Extract(ctx, c.URL, ExtractOptions{Combined: linked && c.PathMatch && !c.External})
 		if err == nil && linked && unusableReason(x) == reasonNoMarker {
 			// The site itself links this page, so an empty-looking 200 is more likely content that
 			// JavaScript renders late than a soft 404 (seen live: aboutyou.de). One retry with a wait.
@@ -171,14 +173,42 @@ func (s *Service) lookupHost(ctx context.Context, host string, extraHosts []stri
 			return imp, err
 		}
 	}
-	for _, p := range fallbackPaths {
-		if !probes {
-			break
+	if !probes {
+		tr.Add("imprint", "no imprint page found", "tried", len(tried))
+		return nil, ErrNotFound
+	}
+
+	// Nothing linked: ask Firecrawl's site map (1 credit flat) instead of guessing paths, which
+	// cost 1 credit per 404 and miss shop paths such as /pages/imprint or /policies/legal-notice.
+	mapped, err := s.scraper.Map(ctx, homepage, mapSearch, mapLimit)
+	switch {
+	case err != nil && hardFailure(err):
+		return nil, err
+	case err != nil:
+		tr.Add("imprint", "site map failed", "error", err)
+	default:
+		mlinks := make([]Link, 0, len(mapped))
+		for _, m := range mapped {
+			mlinks = append(mlinks, Link{URL: m.URL, Text: m.Title})
 		}
-		c := Candidate{URL: "https://" + host + p}
-		if seen(c.URL) {
-			continue
+		fromMap := RankLinks(hosts, base, mlinks)
+		tr.Add("imprint", "site map candidates", "count", len(fromMap))
+		n := 0
+		for _, c := range fromMap {
+			if n == maxMapAttempts || c.External {
+				break
+			}
+			if seen(c.URL) {
+				continue
+			}
+			n++
+			if imp, err := try(c, false); imp != nil || err != nil {
+				return imp, err
+			}
 		}
+	}
+	// Last resort, one guess: the German default path.
+	if c := (Candidate{URL: "https://" + host + "/impressum"}); !seen(c.URL) {
 		tr.Add("imprint", "trying well-known path", "url", c.URL)
 		if imp, err := try(c, false); imp != nil || err != nil {
 			return imp, err
@@ -187,6 +217,13 @@ func (s *Service) lookupHost(ctx context.Context, host string, extraHosts []stri
 	tr.Add("imprint", "no imprint page found", "tried", len(tried))
 	return nil, ErrNotFound
 }
+
+// Site-map discovery: one Map call, at most two candidates from it.
+const (
+	mapSearch      = "impressum imprint legal notice"
+	mapLimit       = 30
+	maxMapAttempts = 2
+)
 
 // maxTextBytes caps the stored page text. Real imprint pages are 5–30 KB of markdown; the cap
 // protects Redis and the callers from pathological pages.

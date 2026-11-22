@@ -22,6 +22,10 @@ type fakeScraper struct {
 	fn    func(ctx context.Context, call int) (*firecrawl.Document, error)
 }
 
+func (f *fakeScraper) Map(context.Context, string, *firecrawl.MapOptions) (*firecrawl.MapData, error) {
+	return &firecrawl.MapData{}, nil
+}
+
 func (f *fakeScraper) Scrape(ctx context.Context, _ string, _ *firecrawl.ScrapeOptions) (*firecrawl.Document, error) {
 	f.mu.Lock()
 	f.calls++
@@ -474,5 +478,26 @@ func TestStoreInCacheOption(t *testing.T) {
 				t.Fatalf("storeInCache = %v (set %v), want %v (set %v)", v, ok, tt.want, tt.isSet)
 			}
 		})
+	}
+}
+
+func TestMapRequestAndResult(t *testing.T) {
+	var body map[string]any
+	var path string
+	c := newSDKClient(t, func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		_, _ = io.WriteString(w, `{"success":true,"links":[{"url":"https://acme.de/pages/imprint","title":"Imprint"},"https://acme.de/impressum",{"url":""}]}`)
+	}, WithLocation("DE", []string{"de"}))
+	links, err := c.Map(context.Background(), "https://acme.de/", "impressum imprint", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/v2/map" || body["search"] != "impressum imprint" || body["limit"] != float64(20) || body["location"] == nil {
+		t.Fatalf("request: path=%s body=%v", path, body)
+	}
+	if len(links) != 2 || links[0] != (MapLink{URL: "https://acme.de/pages/imprint", Title: "Imprint"}) || links[1].URL != "https://acme.de/impressum" {
+		t.Fatalf("links = %+v", links)
 	}
 }

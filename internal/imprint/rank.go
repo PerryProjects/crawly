@@ -21,6 +21,8 @@ type Candidate struct {
 	Text     string
 	Score    int
 	External bool // hosted on an unrelated host; surfaced as a warning
+	// PathMatch is true when an imprint keyword appears in the URL path (not only in the link text).
+	PathMatch bool
 }
 
 // keywords identify an imprint link by path or link text. The weight orders the
@@ -128,11 +130,11 @@ func score(u *url.URL, text string, hosts []string) (Candidate, bool) {
 	path := canonicalizer.Replace(strings.ToLower(pathUnescape(u.Path)))
 	txt := canonicalizer.Replace(strings.ToLower(strings.TrimSpace(text)))
 
-	kw := 0
+	kw, pathMatch := 0, false
 	for _, k := range keywords {
 		switch {
 		case strings.Contains(path, k.word):
-			kw = max(kw, k.weight)
+			kw, pathMatch = max(kw, k.weight), true
 		case strings.Contains(txt, k.word):
 			kw = max(kw, k.weight*8/10)
 		}
@@ -162,7 +164,7 @@ func score(u *url.URL, text string, hosts []string) (Candidate, bool) {
 	}
 	s -= min(len(path), 60) + 5*strings.Count(strings.Trim(path, "/"), "/")
 
-	return Candidate{URL: u.String(), Text: strings.TrimSpace(text), Score: s, External: external}, true
+	return Candidate{URL: u.String(), Text: strings.TrimSpace(text), Score: s, External: external, PathMatch: pathMatch && !privacy}, true
 }
 
 func pathUnescape(p string) string {

@@ -16,7 +16,7 @@ import (
 // TLS certificate for the bare domain). So when the bare registrable domain fails for site
 // reasons, https://www.<host>/ is tried once; the first error is returned if both fail.
 // Timeouts, rate limits, account problems and cancellation are returned immediately.
-func ScrapeHomepage(ctx context.Context, c Crawler, host string, req ScrapeRequest) (*Page, error) {
+func ScrapeHomepage(ctx context.Context, c PageScraper, host string, req ScrapeRequest) (*Page, error) {
 	urls := []string{"https://" + host + "/"}
 	if root, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil && root == host {
 		urls = append(urls, "https://www."+host+"/")

@@ -22,6 +22,7 @@ import (
 // Scraper is the part of *firecrawl.Client this package needs.
 type Scraper interface {
 	Scrape(ctx context.Context, url string, opts *firecrawl.ScrapeOptions) (*firecrawl.Document, error)
+	Map(ctx context.Context, url string, opts *firecrawl.MapOptions) (*firecrawl.MapData, error)
 }
 
 // Observer counts upstream attempts by outcome (ok, rate_limited, timeout, error, canceled).
@@ -143,35 +144,75 @@ func (c *Client) Scrape(ctx context.Context, url string, req ScrapeRequest) (*Pa
 	if fresh, _ := ctx.Value(freshKey{}).(bool); fresh {
 		opts.MaxAge = firecrawl.Int64(0)
 	}
+	var doc *firecrawl.Document
+	err := c.withRetry(ctx, url, c.callTimeout(req), describeRequest(req), func(callCtx context.Context) error {
+		var err error
+		doc, err = c.sc.Scrape(callCtx, url, opts)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	p := toPage(url, doc)
+	observability.TraceFrom(ctx).Add("crawler", "page received", "url", p.URL, "status_code", p.StatusCode,
+		"markdown_bytes", len(p.Markdown), "links", len(p.Links), "has_json", p.JSON != nil, "has_branding", p.Branding != nil)
+	return p, nil
+}
+
+// Map implements Crawler: one call lists URLs of the site that match search, with their page
+// titles. It costs a flat 1 credit however many URLs come back (Firecrawl billing docs).
+func (c *Client) Map(ctx context.Context, siteURL, search string, limit int) ([]MapLink, error) {
+	opts := &firecrawl.MapOptions{Search: firecrawl.String(search), Limit: firecrawl.Int(max(limit, 1))}
+	if c.country != "" {
+		opts.Location = &firecrawl.LocationConfig{Country: c.country, Languages: c.languages}
+	}
+	var data *firecrawl.MapData
+	err := c.withRetry(ctx, siteURL, c.timeout, "map:"+search, func(callCtx context.Context) error {
+		var err error
+		data, err = c.sc.Map(callCtx, siteURL, opts)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]MapLink, 0, len(data.Links))
+	for _, l := range data.Links {
+		if l.URL != "" {
+			out = append(out, MapLink{URL: l.URL, Title: l.Title})
+		}
+	}
+	observability.TraceFrom(ctx).Add("crawler", "site map received", "url", siteURL, "search", search, "links", len(out))
+	return out, nil
+}
+
+// withRetry runs call with the semaphore, a per-call timeout and retries with backoff.
+func (c *Client) withRetry(ctx context.Context, url string, timeout time.Duration, what string, call func(context.Context) error) error {
 	for attempt := 0; ; attempt++ {
-		doc, retryAfter, err := c.attempt(ctx, url, opts, attempt+1, req)
+		retryAfter, err := c.once(ctx, url, timeout, what, attempt+1, call)
 		if err == nil {
-			p := toPage(url, doc)
-			observability.TraceFrom(ctx).Add("crawler", "page received", "url", p.URL, "status_code", p.StatusCode,
-				"markdown_bytes", len(p.Markdown), "links", len(p.Links), "has_json", p.JSON != nil, "has_branding", p.Branding != nil)
-			return p, nil
+			return nil
 		}
 		if !retryable(err) || attempt >= c.maxRetries || ctx.Err() != nil {
-			return nil, err
+			return err
 		}
 		delay := c.backoff(attempt)
 		if retryAfter > delay {
-			delay = min(retryAfter, c.callTimeout(req))
+			delay = min(retryAfter, timeout)
 		}
-		if dl, ok := ctx.Deadline(); ok && time.Until(dl) < delay+c.callTimeout(req) {
+		if dl, ok := ctx.Deadline(); ok && time.Until(dl) < delay+timeout {
 			// A retry that the load deadline would cut short only burns credits and turns a
 			// classified (cacheable) error into an uncached deadline error.
-			return nil, err
+			return err
 		}
 		c.log.Debugw("retrying firecrawl call", observability.Fields(ctx), "attempt", attempt+1, "delay", delay, "code", ErrorCode(err))
 		if serr := c.sleep(ctx, delay); serr != nil {
-			return nil, serr
+			return serr
 		}
 	}
 }
 
-// attempt performs one semaphore-guarded call.
-func (c *Client) attempt(ctx context.Context, url string, opts *firecrawl.ScrapeOptions, n int, req ScrapeRequest) (*firecrawl.Document, time.Duration, error) {
+// once performs one semaphore-guarded call and reports any Retry-After the upstream sent.
+func (c *Client) once(ctx context.Context, url string, timeout time.Duration, what string, n int, call func(context.Context) error) (time.Duration, error) {
 	tr := observability.TraceFrom(ctx)
 	queued := time.Now()
 	select {
@@ -179,24 +220,23 @@ func (c *Client) attempt(ctx context.Context, url string, opts *firecrawl.Scrape
 		defer func() { <-c.sem }()
 	case <-ctx.Done():
 		tr.Add("crawler", "gave up waiting for a free upstream slot", "url", url, "waited", time.Since(queued))
-		return nil, 0, ctx.Err()
+		return 0, ctx.Err()
 	}
 	waited := time.Since(queued)
 	callStart := time.Now()
 
 	box := &retryAfterBox{}
-	callCtx, cancel := context.WithTimeout(context.WithValue(ctx, retryAfterKey{}, box), c.callTimeout(req))
+	callCtx, cancel := context.WithTimeout(context.WithValue(ctx, retryAfterKey{}, box), timeout)
 	defer cancel()
 
-	doc, err := c.sc.Scrape(callCtx, url, opts)
-	outcome, err := classify(ctx, err)
+	outcome, err := classify(ctx, call(callCtx))
 	c.obs.UpstreamCall(outcome)
 	if outcome == "account_error" {
 		c.log.Errorw("firecrawl refused the account: check API key, remaining credits and pending terms", "error", err)
 	}
 	tr.Add("crawler", "firecrawl call", "url", url, "attempt", n, "outcome", outcome, "duration", time.Since(callStart),
-		"queue_wait", waited, "formats", describeRequest(req), "retry_after", box.get(), "error", err)
-	return doc, box.get(), err
+		"queue_wait", waited, "formats", what, "retry_after", box.get(), "error", err)
+	return box.get(), err
 }
 
 // siteErrorCode reports Firecrawl error codes that describe the target site (DNS, TLS, blocked,
