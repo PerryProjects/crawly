@@ -1,6 +1,9 @@
 // siteinfo debug page. Plain Vue 3 (vendored global build), no build step.
 const { createApp, ref, reactive, onMounted, onBeforeUnmount } = Vue;
 
+const ROUTES = ['start', 'crawler', 'debug'];
+const EXAMPLES = ['tagesschau.de', 'orf.at', 'srf.ch', 'fritz-kola.com'];
+
 const HINTS = {
   invalid_url: 'Die Eingabe wurde von der URL-Normalisierung abgelehnt (kein http/https, IP-Adresse, localhost, Port, Userinfo, Fragment …). Siehe den Trace.',
   imprint_not_found: 'Auf der Startseite wurde kein Impressum-Link gefunden und die Standardpfade (/impressum, /imprint, /legal-notice) lieferten keine Impressum-Seite. Das Ergebnis wird 24 h negativ gecacht. Der Trace zeigt die bewerteten Link-Kandidaten und die Ablehnungsgründe.',
@@ -22,6 +25,10 @@ createApp({
     const store = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
     const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } };
 
+    const routeFromHash = () => { const r = location.hash.replace(/^#\/?/, ''); return ROUTES.includes(r) ? r : 'start'; };
+    const route = ref(routeFromHash());
+    const onHash = () => { route.value = routeFromHash(); };
+    const goto = (r) => { location.hash = `#/${r}`; };
     const url = ref('');
     const apiBase = ref(store('apiBase', 'http://localhost:8080'));
     const flushFirst = ref(store('flushFirst', false));
@@ -77,7 +84,7 @@ createApp({
         results.value.unshift(r);
         r.res = await call('GET', `/api/v1/${kind}?url=${enc(input)}&debug=1`);
         r.running = false;
-        r.tab = r.res.ok ? 'result' : (r.res.json && r.res.json._debug ? 'trace' : 'json');
+        r.tab = r.res.json && r.res.json._debug ? 'trace' : 'json';
       });
       await Promise.all(runs);
       results.value = results.value.slice(0, 20);
@@ -93,16 +100,25 @@ createApp({
 
     async function toggleConfig() {
       showConfig.value = !showConfig.value;
-      if (showConfig.value) {
-        configData.value = null; configError.value = '';
-        const res = await call('GET', '/api/v1/debug/config');
-        if (res.ok) configData.value = res.json;
-        else configError.value = res.json?.error?.message || `HTTP ${res.status} – ist SITEINFO_DEBUG_ENABLED gesetzt?`;
-      }
+      if (showConfig.value) await loadConfig();
     }
 
-    onMounted(() => { checkHealth(); healthTimer = setInterval(checkHealth, 10000); });
-    onBeforeUnmount(() => clearInterval(healthTimer));
+    async function loadConfig() {
+      configData.value = null; configError.value = '';
+      const res = await call('GET', '/api/v1/debug/config');
+      if (res.ok) configData.value = res.json;
+      else configError.value = res.json?.error?.message || `HTTP ${res.status} – ist SITEINFO_DEBUG_ENABLED gesetzt?`;
+    }
+
+    onMounted(() => {
+      window.addEventListener('hashchange', onHash);
+      checkHealth(); loadConfig();
+      healthTimer = setInterval(checkHealth, 10000);
+    });
+    onBeforeUnmount(() => { clearInterval(healthTimer); window.removeEventListener('hashchange', onHash); });
+
+    function startLookup(kinds) { goto('crawler'); run(kinds); }
+    const uptime = (s) => dur(s);
 
     // ---- view helpers -------------------------------------------------------------------
     const dbg = (r) => (r.res && r.res.json && r.res.json._debug) || null;
@@ -127,7 +143,6 @@ createApp({
 
     function tabsFor(r) {
       const t = [];
-      if (r.res.ok) t.push('result');
       if (dbg(r)) t.push('trace');
       if (dbg(r) && (dbg(r).cache || dbg(r).cache_error)) t.push('cache');
       t.push('headers', 'json', 'curl');
@@ -202,7 +217,7 @@ createApp({
     const watchApi = () => save('apiBase', apiBase.value);
 
     return {
-      url, apiBase, flushFirst, busy, results, history, health, showConfig, configData, configError, toastMsg,
+      route, goto, startLookup, uptime, examples: EXAMPLES, url, apiBase, flushFirst, busy, results, history, health, showConfig, configData, configError, toastMsg,
       run, flush, toggleConfig, copy, dbg, errCode, errMessage, hint, statusClass, ms, age, isObject, flatten,
       tabsFor, tabLabel, imprintRows, brandImages, brandColors, brandRows, cacheRows, short, bigFields, pretty,
       prettyBody, curl, watchApi,

@@ -389,14 +389,19 @@ cp .env.example .env && docker compose up --build   # Redis + service + debug UI
 ## Debug UI
 
 `docker compose up --build` starts Redis, the service (debug mode on) and a small Vue page on **http://localhost:8081**
-(everything is bound to 127.0.0.1). Put your Firecrawl key in `.env` (`cp .env.example .env`, git-ignored). Enter a site
-URL and press *Impressum*, *Brand* or *Beide*:
+(everything is bound to 127.0.0.1). Put your Firecrawl key in `.env` (`cp .env.example .env`, git-ignored). The menu has
+three pages:
 
-- **Result**: the imprint fields as a table (missing values as `—`), validation warnings, the raw imprint text; for brand
+- **Start**: what the service does, a URL box with example sites, system status (API/Redis readiness, debug mode, runtime,
+  cache TTLs, Firecrawl and protection settings) and the last lookups.
+- **Crawler**: enter a site URL and press *Impressum*, *Brand* or *Beide*; the result is shown for reading.
+- **Debug**: the same lookups, but shown for debugging.
+
+- **Crawler page, result**: the imprint fields as a table (missing values as `—`), validation warnings, the raw imprint text; for brand
   the logo/favicon/OG image, color swatches, fonts, tone of voice.
-- **Status bar**: HTTP status, `X-Cache`, `Retry-After`, browser and server duration, how old the cached data is, the request
+- **Debug page, status bar**: HTTP status, `X-Cache`, `Retry-After`, browser and server duration, how old the cached data is, the request
   id (to find the log lines), and for errors the error code with an explanation of what it usually means.
-- **Trace**: the timeline of that request: URL normalization, cache hit/miss, lock, every Firecrawl call (formats, attempt,
+- **Debug page, trace**: the timeline of that request: URL normalization, cache hit/miss, lock, every Firecrawl call (formats, attempt,
   duration, queue wait, outcome, `Retry-After`), the page received (status code, markdown size, links), the ranked imprint
   link candidates with scores, why a candidate was accepted or rejected, validation warnings, what gets stored and for how
   long. A trace only exists for the request that actually ran the load; for a cache hit use *Cache vorher leeren*.

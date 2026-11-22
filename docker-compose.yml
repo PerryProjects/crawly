@@ -9,7 +9,7 @@
 # config. It is meant for this local stack only; ports are bound to 127.0.0.1.
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]   # cache only, nothing is persisted
     ports: ["127.0.0.1:6379:6379"]
     healthcheck:

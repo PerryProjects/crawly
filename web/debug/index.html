@@ -9,49 +9,99 @@
 <body>
 <div id="app" v-cloak>
   <header>
-    <h1>siteinfo · debug</h1>
-    <span class="pill" :class="health.cls" :title="health.detail">{{ health.label }}</span>
-    <span class="muted">Nur zum Debuggen. Die Seite spricht über einen Proxy mit der API (Token wird serverseitig ergänzt).</span>
+    <h1>siteinfo</h1>
+    <nav>
+      <a href="#/start" :class="{active: route === 'start'}">Start</a>
+      <a href="#/crawler" :class="{active: route === 'crawler'}">Crawler</a>
+      <a href="#/debug" :class="{active: route === 'debug'}">Debug</a>
+    </nav>
     <span style="flex:1"></span>
-    <button @click="toggleConfig">Konfiguration</button>
+    <span class="pill" :class="health.cls" :title="health.detail">{{ health.label }}</span>
   </header>
 
   <main>
-    <section class="card">
-      <form class="row" @submit.prevent="run(['imprint', 'brand'])">
-        <input type="text" v-model.trim="url" placeholder="https://example.de" autofocus spellcheck="false">
-        <button type="button" class="primary" :disabled="!url || busy" @click="run(['imprint'])">Impressum</button>
-        <button type="button" class="primary" :disabled="!url || busy" @click="run(['brand'])">Brand</button>
-        <button type="submit" :disabled="!url || busy">Beide</button>
-      </form>
-      <div class="row" style="margin-top:10px">
-        <label><input type="checkbox" v-model="flushFirst"> Cache vorher leeren (für einen vollständigen Trace)</label>
-        <button :disabled="!url || busy" @click="flush">Cache leeren</button>
-        <label>API für curl: <input type="text" v-model.trim="apiBase" @change="watchApi" style="flex:none;width:220px;padding:4px 6px"></label>
-      </div>
-      <div class="history" v-if="history.length" style="margin-top:8px">
-        <span class="muted">Zuletzt: </span>
-        <button v-for="h in history" :key="h" @click="url = h">{{ h }}</button>
-      </div>
-    </section>
+    <!-- ===================== START ===================== -->
+    <template v-if="route === 'start'">
+      <section class="card hero">
+        <h2>Impressum und Brand-Daten für DACH-Websites</h2>
+        <p class="muted">Gib eine Website-URL ein. Der Dienst findet das Impressum, liest es per Firecrawl aus, validiert die Angaben
+          und liefert Logo, Farben, Schriften und Tonalität. Ergebnisse werden in Redis gecacht.</p>
+        <form class="row" @submit.prevent="startLookup(['imprint', 'brand'])">
+          <input type="text" v-model.trim="url" placeholder="https://example.de" spellcheck="false">
+          <button type="submit" class="primary" :disabled="!url">Crawlen</button>
+        </form>
+        <div class="row" style="margin-top:10px"><span class="muted">Beispiele:</span>
+          <button v-for="e in examples" :key="e" @click="url = e">{{ e }}</button></div>
+      </section>
 
-    <section class="card" v-if="showConfig">
-      <div class="row"><b>Effektive Konfiguration</b><span class="muted">(Geheimnisse sind maskiert)</span></div>
-      <p v-if="!configData" class="muted">{{ configError || 'lädt …' }}</p>
-      <template v-else>
-        <table><tr><th colspan="2">Laufzeit</th></tr>
-          <tr v-for="(v, k) in configData.runtime" :key="k"><th>{{ k }}</th><td>{{ v }}</td></tr></table>
-        <table v-for="(group, name) in configData.config" :key="name" style="margin-top:10px">
-          <tr><th colspan="2">{{ name }}</th></tr>
-          <template v-if="isObject(group)">
-            <tr v-for="(v, k) in flatten(group)" :key="k"><th>{{ k }}</th><td>{{ v }}</td></tr>
+      <div class="cols">
+        <a class="card tile" href="#/crawler"><h3>Crawler →</h3>
+          <p class="muted">Impressum und Brand abfragen und das Ergebnis lesen: Felder, Warnungen, Rohtext, Logo, Farben, Schriften.</p></a>
+        <a class="card tile" href="#/debug"><h3>Debug →</h3>
+          <p class="muted">Warum kommt das raus? Trace jedes Schritts, Cache-Zustand, Header, rohes JSON, curl, Cache leeren, Konfiguration.</p></a>
+      </div>
+
+      <section class="card">
+        <b>Systemstatus</b>
+        <table style="margin-top:6px">
+          <tr><th>API</th><td><span class="pill" :class="health.cls">{{ health.label }}</span> <span class="muted">{{ health.detail }}</span></td></tr>
+          <tr><th>Debug-Modus</th><td>{{ configData ? 'an (Trace, Cache-Tools und Konfiguration verfügbar)' : (configError ? 'aus oder nicht erreichbar' : 'prüfe …') }}</td></tr>
+          <template v-if="configData">
+            <tr><th>Laufzeit</th><td>{{ configData.runtime.go_version }} · Host {{ configData.runtime.hostname }} · läuft seit {{ uptime(configData.runtime.uptime_seconds) }}</td></tr>
+            <tr><th>Cache-TTLs</th><td>Impressum/Brand {{ configData.config.cache.ttl.imprint_ok }}, nicht gefunden {{ configData.config.cache.ttl.not_found }}, Fehler {{ configData.config.cache.ttl.error }}</td></tr>
+            <tr><th>Firecrawl</th><td>{{ configData.config.firecrawl.api_url }} · Timeout {{ configData.config.firecrawl.timeout }} · max. {{ configData.config.firecrawl.max_concurrency }} parallel · API-Key {{ configData.config.firecrawl.api_key }}</td></tr>
+            <tr><th>Schutz</th><td>IP-Limit {{ configData.config.protect.ip_rate }}/s, Token-Limit {{ configData.config.protect.token_rate }}/s, max. {{ configData.config.protect.max_concurrent_loads }} gleichzeitige Loads</td></tr>
           </template>
-          <tr v-else><th>{{ name }}</th><td>{{ group }}</td></tr>
         </table>
-      </template>
-    </section>
+      </section>
 
-    <div class="toast" v-if="toastMsg">{{ toastMsg }}</div>
+      <section class="card" v-if="history.length">
+        <b>Zuletzt abgefragt</b>
+        <div class="history" style="margin-top:8px"><button v-for="h in history" :key="h" @click="url = h; goto('crawler')">{{ h }}</button></div>
+      </section>
+    </template>
+
+    <!-- ===================== CRAWLER + DEBUG ===================== -->
+    <template v-else>
+      <section class="card">
+        <form class="row" @submit.prevent="run(['imprint', 'brand'])">
+          <input type="text" v-model.trim="url" placeholder="https://example.de" autofocus spellcheck="false">
+          <button type="button" class="primary" :disabled="!url || busy" @click="run(['imprint'])">Impressum</button>
+          <button type="button" class="primary" :disabled="!url || busy" @click="run(['brand'])">Brand</button>
+          <button type="submit" :disabled="!url || busy">Beide</button>
+        </form>
+        <div class="row" style="margin-top:10px" v-if="route === 'debug'">
+          <label><input type="checkbox" v-model="flushFirst"> Cache vorher leeren (vollständiger Trace)</label>
+          <button :disabled="!url || busy" @click="flush">Cache leeren</button>
+          <label>API für curl: <input type="text" v-model.trim="apiBase" @change="watchApi" style="flex:none;width:220px;padding:4px 6px"></label>
+          <button @click="toggleConfig">Konfiguration {{ showConfig ? 'ausblenden' : 'anzeigen' }}</button>
+        </div>
+        <div class="history" v-if="history.length" style="margin-top:8px">
+          <span class="muted">Zuletzt: </span>
+          <button v-for="h in history" :key="h" @click="url = h">{{ h }}</button>
+        </div>
+      </section>
+
+      <section class="card" v-if="route === 'debug' && showConfig">
+        <div class="row"><b>Effektive Konfiguration</b><span class="muted">(Geheimnisse sind maskiert)</span></div>
+        <p v-if="!configData" class="muted">{{ configError || 'lädt …' }}</p>
+        <template v-else>
+          <table><tr><th colspan="2">Laufzeit</th></tr>
+            <tr v-for="(v, k) in configData.runtime" :key="k"><th>{{ k }}</th><td>{{ v }}</td></tr></table>
+          <table v-for="(group, name) in configData.config" :key="name" style="margin-top:10px">
+            <tr><th colspan="2">{{ name }}</th></tr>
+            <template v-if="isObject(group)">
+              <tr v-for="(v, k) in flatten(group)" :key="k"><th>{{ k }}</th><td>{{ v }}</td></tr>
+            </template>
+            <tr v-else><th>{{ name }}</th><td>{{ group }}</td></tr>
+          </table>
+        </template>
+      </section>
+
+      <section class="card muted" v-if="!results.length">
+        {{ route === 'crawler' ? 'Noch keine Abfrage. URL eingeben und „Impressum", „Brand" oder „Beide" wählen.'
+                               : 'Noch keine Abfrage. Starte oben eine Abfrage; hier siehst du Trace, Cache-Zustand, Header und rohes JSON.' }}
+      </section>
 
     <section class="card" v-for="r in results" :key="r.id">
       <div class="row">
@@ -61,7 +111,15 @@
       </div>
 
       <template v-if="!r.running">
-        <div class="row" style="margin-top:8px">
+        <div class="row" style="margin-top:8px" v-if="route === 'crawler'">
+          <span class="pill" :class="statusClass(r.res.status)">HTTP {{ r.res.status || 'Netzwerkfehler' }}</span>
+          <span class="pill" v-if="r.res.headers['x-cache']" :class="r.res.headers['x-cache'] === 'HIT' ? 'ok' : ''">{{ r.res.headers['x-cache'] === 'HIT' ? 'aus dem Cache' : 'frisch geladen' }}</span>
+          <span class="pill">{{ ms(r.res.ms) }}</span>
+          <span class="pill" v-if="r.res.json && r.res.json.host">{{ r.res.json.host }}</span>
+          <span class="pill" v-if="r.res.json && r.res.json.fetched_at" :title="r.res.json.fetched_at">geladen vor {{ age(r.res.json.fetched_at) }}</span>
+          <span class="pill warn" v-if="r.res.json && r.res.json.warnings && r.res.json.warnings.length">{{ r.res.json.warnings.length }} Warnung(en)</span>
+        </div>
+        <div class="row" style="margin-top:8px" v-else>
           <span class="pill" :class="statusClass(r.res.status)">HTTP {{ r.res.status || 'Netzwerkfehler' }}</span>
           <span class="pill" v-if="r.res.headers['x-cache']" :class="r.res.headers['x-cache'] === 'HIT' ? 'ok' : ''">X-Cache {{ r.res.headers['x-cache'] }}</span>
           <span class="pill" v-if="r.res.headers['x-cache-refresh']">Refresh: {{ r.res.headers['x-cache-refresh'] }}</span>
@@ -77,14 +135,15 @@
         <div class="error" v-if="r.res.error || (r.res.json && r.res.json.error)">
           <b>{{ errCode(r) }}</b> – {{ errMessage(r) }}
           <div class="hint" v-if="hint(errCode(r))">{{ hint(errCode(r)) }}</div>
+          <div class="hint" v-if="route === 'crawler'"><a href="#/debug">Im Debug-Bereich ansehen (Trace, Cache, Header) →</a></div>
         </div>
 
-        <div class="tabs">
+        <div class="tabs" v-if="route === 'debug'">
           <button v-for="t in tabsFor(r)" :key="t" :class="{active: r.tab === t}" @click="r.tab = t">{{ tabLabel(t, r) }}</button>
         </div>
 
         <!-- Ergebnis: Impressum -->
-        <template v-if="r.tab === 'result' && r.kind === 'imprint' && r.res.ok">
+        <template v-if="route === 'crawler' && r.kind === 'imprint' && r.res.ok">
           <div class="warnings" v-if="r.res.json.warnings && r.res.json.warnings.length">
             <div v-for="w in r.res.json.warnings" :key="w">⚠ {{ w }}</div>
           </div>
@@ -98,7 +157,7 @@
         </template>
 
         <!-- Ergebnis: Brand -->
-        <template v-if="r.tab === 'result' && r.kind === 'brand' && r.res.ok">
+        <template v-if="route === 'crawler' && r.kind === 'brand' && r.res.ok">
           <div>
             <span class="imgbox" v-for="img in brandImages(r.res.json)" :key="img[0]">
               <img :src="img[1]" :alt="img[0]"><small>{{ img[0] }}</small></span>
@@ -115,7 +174,7 @@
         </template>
 
         <!-- Trace -->
-        <template v-if="r.tab === 'trace' && dbg(r)">
+        <template v-if="route === 'debug' && r.tab === 'trace' && dbg(r)">
           <p class="muted" v-if="dbg(r).note">{{ dbg(r).note }}</p>
           <table class="trace">
             <tr v-for="(e, i) in dbg(r).trace" :key="i">
@@ -129,7 +188,7 @@
         </template>
 
         <!-- Cache -->
-        <template v-if="r.tab === 'cache' && dbg(r)">
+        <template v-if="route === 'debug' && r.tab === 'cache' && dbg(r)">
           <p class="muted" v-if="dbg(r).cache_error">{{ dbg(r).cache_error }}</p>
           <table v-if="dbg(r).cache">
             <tr v-for="row in cacheRows(dbg(r).cache)" :key="row[0]"><th>{{ row[0] }}</th><td>{{ row[1] }}</td></tr>
@@ -139,24 +198,25 @@
         </template>
 
         <!-- Header -->
-        <table v-if="r.tab === 'headers'">
+        <table v-if="route === 'debug' && r.tab === 'headers'">
           <tr v-for="(v, k) in r.res.headers" :key="k"><th>{{ k }}</th><td>{{ v }}</td></tr>
         </table>
 
         <!-- JSON -->
-        <template v-if="r.tab === 'json'">
+        <template v-if="route === 'debug' && r.tab === 'json'">
           <div class="row"><button @click="copy(r.res.text)">Vollständiges JSON kopieren</button>
             <span class="muted" v-if="r.res.json && r.res.json.text">„text“ ist hier gekürzt dargestellt.</span></div>
           <pre>{{ prettyBody(r.res) }}</pre>
         </template>
 
         <!-- curl -->
-        <template v-if="r.tab === 'curl'">
+        <template v-if="route === 'debug' && r.tab === 'curl'">
           <pre>{{ curl(r) }}</pre>
           <p class="muted">Der Token steht nicht in der Seite; setze <code>$TOKEN</code> auf einen Wert aus <code>SITEINFO_AUTH_TOKENS</code>.</p>
         </template>
       </template>
     </section>
+    </template>
   </main>
 </div>
 <script src="vendor/vue.global.prod.js"></script>
