@@ -29,6 +29,15 @@ type Config struct {
 	Cache     CacheConfig     `mapstructure:"cache"`
 	Protect   ProtectConfig   `mapstructure:"protect"`
 	Otel      OtelConfig      `mapstructure:"otel"`
+	Debug     DebugConfig     `mapstructure:"debug"`
+}
+
+// DebugConfig enables the debugging aids used by the debug UI: per-request traces
+// (`debug=1`), cache inspection and flushing, and the effective-config endpoint.
+// They sit behind the normal authentication but reveal internals and allow cache
+// deletion, so keep this off in production.
+type DebugConfig struct {
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // LogConfig configures logging. Sampling applies in production only: within one second the

@@ -4,3 +4,6 @@ deploy
 docs
 *.md
 coverage.out
+.env
+.env.*
+web

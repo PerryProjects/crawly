@@ -109,6 +109,10 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 			MaxTrackedKeys:        cfg.Protect.MaxTrackedKeys,
 		}),
 	}
+	if cfg.Debug.Enabled {
+		sugar.Warn("DEBUG mode is enabled: per-request traces, cache flushing and config inspection are available; do not run this in production")
+		srvOpts = append(srvOpts, server.WithDebug(cfg.Describe()))
+	}
 	if len(cfg.Server.TrustedProxies) > 0 {
 		nets := make([]*net.IPNet, 0, len(cfg.Server.TrustedProxies))
 		for _, cidr := range cfg.Server.TrustedProxies {

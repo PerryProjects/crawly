@@ -69,7 +69,15 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Imprint, error) {
 	}
 	hosts := []string{host, base.Hostname()}
 
-	ranked := RankLinks(hosts, base, MergeLinks(home.Links, home.Markdown))
+	tr := observability.TraceFrom(ctx)
+	links := MergeLinks(home.Links, home.Markdown)
+	tr.Add("imprint", "homepage loaded", "final_url", home.URL, "status_code", home.StatusCode, "links_total", len(links))
+	ranked := RankLinks(hosts, base, links)
+	top := make([]map[string]any, 0, 8)
+	for _, c := range ranked[:min(len(ranked), 8)] {
+		top = append(top, map[string]any{"url": c.URL, "text": c.Text, "score": c.Score, "external": c.External})
+	}
+	tr.Add("imprint", "imprint link candidates (best first; the first two are tried)", "count", len(ranked), "top", top)
 	attempts := ranked[:min(len(ranked), maxLinkedAttempts)]
 
 	tried := map[string]bool{}
@@ -77,17 +85,21 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Imprint, error) {
 		tried[c.URL] = true
 		x, err := s.extractor.Extract(ctx, c.URL)
 		if err != nil {
+			tr.Add("imprint", "candidate scrape failed", "url", c.URL, "abort_lookup", hardFailure(err), "error", err)
 			if hardFailure(err) {
 				return nil, err
 			}
 			s.log.Debugw("imprint candidate failed", observability.Fields(ctx), "url", c.URL, "error", err)
 			return nil, nil
 		}
-		if !usable(x) {
+		if reason := unusableReason(x); reason != "" {
+			tr.Add("imprint", "candidate rejected", "url", c.URL, "reason", reason, "status_code", x.StatusCode, "text_bytes", len(x.Text))
 			s.log.Debugw("imprint candidate rejected", observability.Fields(ctx), "url", c.URL, "status", x.StatusCode)
 			return nil, nil
 		}
-		return build(x, c, hosts), nil
+		imp := build(x, c, hosts)
+		tr.Add("imprint", "candidate accepted", "url", imp.ImprintURL, "text_bytes", len(x.Text), "warnings", imp.Warnings, "extraction_warnings", x.Warnings)
+		return imp, nil
 	}
 
 	for _, c := range attempts {
@@ -100,10 +112,12 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Imprint, error) {
 		if tried[c.URL] {
 			continue
 		}
+		tr.Add("imprint", "trying well-known path", "url", c.URL)
 		if imp, err := try(c); imp != nil || err != nil {
 			return imp, err
 		}
 	}
+	tr.Add("imprint", "no imprint page found", "tried", len(tried))
 	return nil, ErrNotFound
 }
 
@@ -112,13 +126,20 @@ func hardFailure(err error) bool {
 	return !errors.Is(err, crawler.ErrUpstream) || errors.Is(err, crawler.ErrUpstreamTimeout) || errors.Is(err, crawler.ErrRateLimited)
 }
 
-// usable accepts a page that returned a success status and reads like an imprint.
-func usable(x Extraction) bool {
-	if x.StatusCode >= 400 || strings.TrimSpace(x.Text) == "" {
-		return false
+// unusableReason returns why a page is not an imprint, or "" if it qualifies: it must have
+// returned a success status and read like an imprint.
+func unusableReason(x Extraction) string {
+	switch {
+	case x.StatusCode >= 400:
+		return fmt.Sprintf("target answered HTTP %d", x.StatusCode)
+	case strings.TrimSpace(x.Text) == "":
+		return "empty page"
 	}
 	lower := strings.ToLower(x.Text)
-	return slices.ContainsFunc(imprintMarkers, func(m string) bool { return strings.Contains(lower, m) })
+	if !slices.ContainsFunc(imprintMarkers, func(m string) bool { return strings.Contains(lower, m) }) {
+		return "no imprint marker word in the text (soft 404?)"
+	}
+	return ""
 }
 
 func build(x Extraction, c Candidate, hosts []string) *Imprint {

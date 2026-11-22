@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>siteinfo debug</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" v-cloak>
+  <header>
+    <h1>siteinfo · debug</h1>
+    <span class="pill" :class="health.cls" :title="health.detail">{{ health.label }}</span>
+    <span class="muted">Nur zum Debuggen. Die Seite spricht über einen Proxy mit der API (Token wird serverseitig ergänzt).</span>
+    <span style="flex:1"></span>
+    <button @click="toggleConfig">Konfiguration</button>
+  </header>
+
+  <main>
+    <section class="card">
+      <form class="row" @submit.prevent="run(['imprint', 'brand'])">
+        <input type="text" v-model.trim="url" placeholder="https://example.de" autofocus spellcheck="false">
+        <button type="button" class="primary" :disabled="!url || busy" @click="run(['imprint'])">Impressum</button>
+        <button type="button" class="primary" :disabled="!url || busy" @click="run(['brand'])">Brand</button>
+        <button type="submit" :disabled="!url || busy">Beide</button>
+      </form>
+      <div class="row" style="margin-top:10px">
+        <label><input type="checkbox" v-model="flushFirst"> Cache vorher leeren (für einen vollständigen Trace)</label>
+        <button :disabled="!url || busy" @click="flush">Cache leeren</button>
+        <label>API für curl: <input type="text" v-model.trim="apiBase" @change="watchApi" style="flex:none;width:220px;padding:4px 6px"></label>
+      </div>
+      <div class="history" v-if="history.length" style="margin-top:8px">
+        <span class="muted">Zuletzt: </span>
+        <button v-for="h in history" :key="h" @click="url = h">{{ h }}</button>
+      </div>
+    </section>
+
+    <section class="card" v-if="showConfig">
+      <div class="row"><b>Effektive Konfiguration</b><span class="muted">(Geheimnisse sind maskiert)</span></div>
+      <p v-if="!configData" class="muted">{{ configError || 'lädt …' }}</p>
+      <template v-else>
+        <table><tr><th colspan="2">Laufzeit</th></tr>
+          <tr v-for="(v, k) in configData.runtime" :key="k"><th>{{ k }}</th><td>{{ v }}</td></tr></table>
+        <table v-for="(group, name) in configData.config" :key="name" style="margin-top:10px">
+          <tr><th colspan="2">{{ name }}</th></tr>
+          <template v-if="isObject(group)">
+            <tr v-for="(v, k) in flatten(group)" :key="k"><th>{{ k }}</th><td>{{ v }}</td></tr>
+          </template>
+          <tr v-else><th>{{ name }}</th><td>{{ group }}</td></tr>
+        </table>
+      </template>
+    </section>
+
+    <div class="toast" v-if="toastMsg">{{ toastMsg }}</div>
+
+    <section class="card" v-for="r in results" :key="r.id">
+      <div class="row">
+        <b style="font-size:15px">{{ r.kind === 'imprint' ? 'Impressum' : 'Brand' }}</b>
+        <span class="muted">{{ r.input }}</span>
+        <span v-if="r.running" class="pill warn">läuft …</span>
+      </div>
+
+      <template v-if="!r.running">
+        <div class="row" style="margin-top:8px">
+          <span class="pill" :class="statusClass(r.res.status)">HTTP {{ r.res.status || 'Netzwerkfehler' }}</span>
+          <span class="pill" v-if="r.res.headers['x-cache']" :class="r.res.headers['x-cache'] === 'HIT' ? 'ok' : ''">X-Cache {{ r.res.headers['x-cache'] }}</span>
+          <span class="pill" v-if="r.res.headers['x-cache-refresh']">Refresh: {{ r.res.headers['x-cache-refresh'] }}</span>
+          <span class="pill" v-if="r.res.headers['retry-after']">Retry-After {{ r.res.headers['retry-after'] }}s</span>
+          <span class="pill">{{ ms(r.res.ms) }} (Browser)</span>
+          <span class="pill" v-if="dbg(r)">{{ ms(dbg(r).duration_ms) }} (Server)</span>
+          <span class="pill" v-if="r.res.json && r.res.json.host">{{ r.res.json.host }}</span>
+          <span class="pill" v-if="r.res.json && r.res.json.fetched_at" :title="r.res.json.fetched_at">geladen vor {{ age(r.res.json.fetched_at) }}</span>
+          <span class="muted" v-if="r.res.headers['x-request-id']">Request-ID <code>{{ r.res.headers['x-request-id'] }}</code>
+            <a href="#" @click.prevent="copy(r.res.headers['x-request-id'])">kopieren</a></span>
+        </div>
+
+        <div class="error" v-if="r.res.error || (r.res.json && r.res.json.error)">
+          <b>{{ errCode(r) }}</b> – {{ errMessage(r) }}
+          <div class="hint" v-if="hint(errCode(r))">{{ hint(errCode(r)) }}</div>
+        </div>
+
+        <div class="tabs">
+          <button v-for="t in tabsFor(r)" :key="t" :class="{active: r.tab === t}" @click="r.tab = t">{{ tabLabel(t, r) }}</button>
+        </div>
+
+        <!-- Ergebnis: Impressum -->
+        <template v-if="r.tab === 'result' && r.kind === 'imprint' && r.res.ok">
+          <div class="warnings" v-if="r.res.json.warnings && r.res.json.warnings.length">
+            <div v-for="w in r.res.json.warnings" :key="w">⚠ {{ w }}</div>
+          </div>
+          <table>
+            <tr v-for="row in imprintRows(r.res.json)" :key="row[0]"><th>{{ row[0] }}</th>
+              <td :class="{null: row[1] === null}">{{ row[1] === null ? '—' : row[1] }}</td></tr>
+            <tr><th>Impressum-Seite</th><td><a :href="r.res.json.imprint_url" target="_blank" rel="noreferrer">{{ r.res.json.imprint_url }}</a></td></tr>
+          </table>
+          <details style="margin-top:8px"><summary>Rohtext der Seite ({{ (r.res.json.text || '').length }} Zeichen) – rechtlich maßgeblich</summary>
+            <pre>{{ r.res.json.text }}</pre></details>
+        </template>
+
+        <!-- Ergebnis: Brand -->
+        <template v-if="r.tab === 'result' && r.kind === 'brand' && r.res.ok">
+          <div>
+            <span class="imgbox" v-for="img in brandImages(r.res.json)" :key="img[0]">
+              <img :src="img[1]" :alt="img[0]"><small>{{ img[0] }}</small></span>
+          </div>
+          <div class="grid" style="margin:6px 0 12px">
+            <div class="swatch" v-for="c in brandColors(r.res.json)" :key="c[0]"><i :style="{background: c[1]}"></i><span>{{ c[0] }}<br><code>{{ c[1] }}</code></span></div>
+          </div>
+          <table>
+            <tr v-for="row in brandRows(r.res.json)" :key="row[0]"><th>{{ row[0] }}</th>
+              <td :class="{null: row[1] === null}">{{ row[1] === null ? '—' : row[1] }}</td></tr>
+            <tr><th>Tonalität</th><td><span class="pill" v-for="t in r.res.json.tone_of_voice" :key="t" style="margin-right:4px">{{ t }}</span>
+              <span class="muted" v-if="r.res.json.tone_source">Quelle: {{ r.res.json.tone_source }}</span><span v-if="!r.res.json.tone_of_voice.length" class="muted">—</span></td></tr>
+          </table>
+        </template>
+
+        <!-- Trace -->
+        <template v-if="r.tab === 'trace' && dbg(r)">
+          <p class="muted" v-if="dbg(r).note">{{ dbg(r).note }}</p>
+          <table class="trace">
+            <tr v-for="(e, i) in dbg(r).trace" :key="i">
+              <td>+{{ e.at_ms.toFixed(1) }} ms</td>
+              <td><span class="stage" :class="e.stage">{{ e.stage }}</span> {{ e.message }}
+                <div class="fields" v-if="e.fields"><span v-for="(v, k) in e.fields" :key="k" style="margin-right:12px"><b>{{ k }}</b>={{ short(v) }}</span></div>
+                <details v-if="e.fields && bigFields(e.fields).length"><summary>Details</summary><pre>{{ pretty(Object.fromEntries(bigFields(e.fields))) }}</pre></details>
+              </td>
+            </tr>
+          </table>
+        </template>
+
+        <!-- Cache -->
+        <template v-if="r.tab === 'cache' && dbg(r)">
+          <p class="muted" v-if="dbg(r).cache_error">{{ dbg(r).cache_error }}</p>
+          <table v-if="dbg(r).cache">
+            <tr v-for="row in cacheRows(dbg(r).cache)" :key="row[0]"><th>{{ row[0] }}</th><td>{{ row[1] }}</td></tr>
+          </table>
+          <p class="muted">Eingabe → Host: <code>{{ dbg(r).input }}</code> → <code>{{ dbg(r).host || '(abgelehnt)' }}</code>;
+            der Cache-Schlüssel enthält nur den Host, Pfad und Query der Eingabe werden ignoriert.</p>
+        </template>
+
+        <!-- Header -->
+        <table v-if="r.tab === 'headers'">
+          <tr v-for="(v, k) in r.res.headers" :key="k"><th>{{ k }}</th><td>{{ v }}</td></tr>
+        </table>
+
+        <!-- JSON -->
+        <template v-if="r.tab === 'json'">
+          <div class="row"><button @click="copy(r.res.text)">Vollständiges JSON kopieren</button>
+            <span class="muted" v-if="r.res.json && r.res.json.text">„text“ ist hier gekürzt dargestellt.</span></div>
+          <pre>{{ prettyBody(r.res) }}</pre>
+        </template>
+
+        <!-- curl -->
+        <template v-if="r.tab === 'curl'">
+          <pre>{{ curl(r) }}</pre>
+          <p class="muted">Der Token steht nicht in der Seite; setze <code>$TOKEN</code> auf einen Wert aus <code>SITEINFO_AUTH_TOKENS</code>.</p>
+        </template>
+      </template>
+    </section>
+  </main>
+</div>
+<script src="vendor/vue.global.prod.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

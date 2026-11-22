@@ -602,3 +602,57 @@ func TestLoadAdmissionRateLimit(t *testing.T) {
 		t.Fatalf("hit under rate limit: %+v %v", entry, err)
 	}
 }
+
+func TestInspectAndFlush(t *testing.T) {
+	e := newEnv(t)
+	s := e.store(WithRefreshCooldown(time.Hour))
+	ctx := context.Background()
+
+	info, err := s.Inspect(ctx, testKey)
+	if err != nil || info.Exists || info.TTLSeconds != -1 || info.LockHeld || info.CooldownTTLSeconds != -1 {
+		t.Fatalf("empty: %+v %v", info, err)
+	}
+	if info.CacheKey != testKey.Cache() || info.LockKey != testKey.Lock() {
+		t.Fatalf("keys: %+v", info)
+	}
+
+	var calls atomic.Int32
+	if _, err := s.Load(ctx, testKey, okFetch(&calls, nil), LoadOptions{Refresh: true}); err != nil {
+		t.Fatal(err)
+	}
+	info, err = s.Inspect(ctx, testKey)
+	if err != nil || !info.Exists || info.Status != StatusOK || info.SizeBytes == 0 || info.AgeSeconds < 0 ||
+		info.TTLSeconds < 29*24*3600 || info.CooldownTTLSeconds <= 0 || info.LockHeld {
+		t.Fatalf("after load: %+v %v", info, err)
+	}
+
+	// The lock is reported while someone holds it.
+	e.mr.Set(testKey.Lock(), "x")
+	if info, _ = s.Inspect(ctx, testKey); !info.LockHeld {
+		t.Fatal("lock must be reported")
+	}
+	e.mr.Del(testKey.Lock())
+
+	n, err := s.Flush(ctx, testKey)
+	if err != nil || n != 2 { // entry + cooldown
+		t.Fatalf("flush = %d, %v", n, err)
+	}
+	if info, _ = s.Inspect(ctx, testKey); info.Exists || info.CooldownTTLSeconds != -1 {
+		t.Fatalf("after flush: %+v", info)
+	}
+	if _, err := s.Load(ctx, testKey, okFetch(&calls, nil), LoadOptions{}); err != nil || calls.Load() != 2 {
+		t.Fatalf("a flushed entry must be reloaded: err=%v calls=%d", err, calls.Load())
+	}
+}
+
+func TestInspectRedisDown(t *testing.T) {
+	e := newEnv(t)
+	s := e.store()
+	e.mr.Close()
+	if _, err := s.Inspect(context.Background(), testKey); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := s.Flush(context.Background(), testKey); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("err = %v", err)
+	}
+}

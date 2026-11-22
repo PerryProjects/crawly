@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"go.uber.org/zap"
@@ -127,6 +128,14 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Brand, error) {
 		base, _ = url.Parse(homepage)
 	}
 	b := Map(page, base)
+	keys := make([]string, 0, len(page.Branding))
+	for k := range page.Branding {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	observability.TraceFrom(ctx).Add("brand", "homepage mapped", "final_url", page.URL, "status_code", page.StatusCode,
+		"branding_keys", keys, "llm_extraction", page.JSON != nil, "logo_found", b.Logo != nil, "colors_found", b.Colors.Primary != nil,
+		"tone_source", deref(b.ToneSource))
 	if page.Branding == nil {
 		s.log.Warnw("firecrawl returned no branding payload", observability.Fields(ctx), "host", host)
 	}

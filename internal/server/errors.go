@@ -122,6 +122,7 @@ type errorBody struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
+	Debug *debugBlock `json:"_debug,omitempty"`
 }
 
 // handleError is the central echo error handler.
@@ -143,6 +144,7 @@ func (s *Server) handleError(c *echo.Context, err error) {
 	}
 	var body errorBody
 	body.Error.Code, body.Error.Message = ae.code, ae.message
+	body.Debug, _ = c.Get(ctxDebug).(*debugBlock)
 	if jerr := c.JSON(ae.status, body); jerr != nil {
 		s.sugar.Errorw("writing error response failed", observability.Fields(c.Request().Context()), "error", jerr)
 	}

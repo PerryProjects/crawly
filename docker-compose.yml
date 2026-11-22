@@ -1,12 +1,17 @@
-# Local development: one single-node Redis plus the service.
+# Local development and debugging: single-node Redis, the service, and a small debug UI.
 # Redis Cluster is used in production; local dev uses redis.mode=single.
-#   FIRECRAWL_API_KEY=fc-... docker compose up --build
-#   curl -H 'Authorization: Bearer dev-token-0123456789abcdef' 'localhost:8080/v1/imprint?url=https://example.de'
+#
+#   cp .env.example .env      # put your Firecrawl API key in .env
+#   docker compose up --build
+#   open http://localhost:8081   (debug UI; the API itself is on http://localhost:8080)
+#
+# Debug mode (SITEINFO_DEBUG_ENABLED) exposes per-request traces, cache flushing and the effective
+# config. It is meant for this local stack only; ports are bound to 127.0.0.1.
 services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]   # cache only, nothing is persisted
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
@@ -19,14 +24,25 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       SITEINFO_ENV: dev
       SITEINFO_LOG_LEVEL: debug
       SITEINFO_REDIS_MODE: single
       SITEINFO_REDIS_ADDRS: redis:6379
-      SITEINFO_AUTH_TOKENS: dev-token-0123456789abcdef
-      SITEINFO_FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:?set FIRECRAWL_API_KEY}
+      SITEINFO_AUTH_TOKENS: ${SITEINFO_TOKEN:-dev-token-0123456789abcdef}
+      SITEINFO_FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:?copy .env.example to .env and set FIRECRAWL_API_KEY}
       SITEINFO_SERVER_SHUTDOWN_DELAY: 1s
+      SITEINFO_DEBUG_ENABLED: "true"
       # Metrics are pushed via OTLP/HTTP. Set an endpoint (e.g. http://otel-collector:4318) to export; "stdout" prints them.
       SITEINFO_OTEL_EXPORTER: ${SITEINFO_OTEL_EXPORTER:-none}
+
+  debug-ui:
+    build: ./web/debug
+    depends_on:
+      - siteinfo
+    ports:
+      - "127.0.0.1:8081:80"
+    environment:
+      API_UPSTREAM: http://siteinfo:8080
+      API_TOKEN: ${SITEINFO_TOKEN:-dev-token-0123456789abcdef}

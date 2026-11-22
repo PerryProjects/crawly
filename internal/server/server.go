@@ -92,6 +92,10 @@ type Server struct {
 	now          func() time.Time
 	entries      sync.Pool // *accessEntry, so the access log allocates nothing per request
 
+	debug     bool
+	debugInfo map[string]any
+	started   time.Time
+
 	shuttingDown atomic.Bool
 }
 
@@ -131,6 +135,13 @@ func WithProtection(p Protection) Option {
 // spoofable header would defeat per-IP limits.
 func WithTrustedProxies(nets []*net.IPNet) Option { return func(s *Server) { s.trustedProxies = nets } }
 
+// WithDebug enables the debugging aids: `debug=1` adds a "_debug" object (trace, cache state) to
+// lookup responses, plus DELETE /v1/debug/cache and GET /v1/debug/config. info is the redacted
+// effective configuration shown by the latter. Keep this off in production.
+func WithDebug(info map[string]any) Option {
+	return func(s *Server) { s.debug, s.debugInfo = true, info }
+}
+
 // WithoutAuth disables bearer authentication. This is for local development only.
 func WithoutAuth() Option { return func(s *Server) { s.noAuth = true } }
 
@@ -141,7 +152,7 @@ func New(loader cache.Loader, imprints ImprintLookup, brands BrandLookup, ready 
 		loader: loader, imprints: imprints, brands: brands, ready: ready,
 		log: zap.NewNop(), obs: noopRequestObserver{},
 		handlerTimeout: 45 * time.Second, retryAfter: 5 * time.Second, readyTimeout: time.Second,
-		now: time.Now,
+		now: time.Now, started: time.Now(),
 	}
 	s.entries.New = func() any { return new(accessEntry) }
 	for _, o := range opts {
@@ -179,6 +190,10 @@ func New(loader cache.Loader, imprints ImprintLookup, brands BrandLookup, ready 
 	// Order: shed/limit cheaply first (per IP, in-flight cap), then authenticate, then per-token limit.
 	s.echo.GET("/v1/imprint", s.getImprint, s.protect, s.authenticate)
 	s.echo.GET("/v1/brand", s.getBrand, s.protect, s.authenticate)
+	if s.debug {
+		s.echo.DELETE("/v1/debug/cache", s.flushCache, s.protect, s.authenticate)
+		s.echo.GET("/v1/debug/config", s.showConfig, s.protect, s.authenticate)
+	}
 	return s, nil
 }
 

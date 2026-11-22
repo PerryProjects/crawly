@@ -249,6 +249,7 @@ type loadResult struct {
 //  4. Leader takes the redsync lock, 5. double-checks the cache, fetches, SETs, unlocks.
 func (s *Store) Load(ctx context.Context, key Key, fetch FetchFunc, opt LoadOptions) (Entry, error) {
 	kind := string(key.Kind)
+	tr := observability.TraceFrom(ctx)
 	throttled := false
 	if opt.Refresh {
 		ok, err := s.rdb.SetNX(ctx, key.Cooldown(), "1", s.refreshCool).Result()
@@ -256,6 +257,7 @@ func (s *Store) Load(ctx context.Context, key Key, fetch FetchFunc, opt LoadOpti
 			return Entry{}, fmt.Errorf("%w: refresh cooldown: %w", ErrStoreUnavailable, err)
 		}
 		throttled = !ok
+		tr.Add("cache", "refresh requested", "cooldown_active", throttled, "cooldown", s.refreshCool.String())
 	}
 	forceFresh := opt.Refresh && !throttled
 
@@ -270,9 +272,11 @@ func (s *Store) Load(ctx context.Context, key Key, fetch FetchFunc, opt LoadOpti
 				outcome = "refresh_throttled"
 			}
 			s.obs.CacheLookup(kind, outcome)
+			tr.Add("cache", "hit", "key", key.Cache(), "status", string(env.Status), "age_s", int(s.now().Sub(env.FetchedAt).Seconds()))
 			return s.cachedEntry(env, throttled)
 		}
 		s.obs.CacheLookup(kind, "miss")
+		tr.Add("cache", "miss", "key", key.Cache())
 	}
 
 	ch := s.sf.DoChan(key.Cache(), func() (any, error) {
@@ -372,6 +376,8 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 		return loadResult{err: fmt.Errorf("%w: lock: %w", ErrStoreUnavailable, err)}
 	}
 	s.obs.LockWait(kind, "acquired", time.Since(lockStart))
+	tr := observability.TraceFrom(ctx)
+	tr.Add("cache", "lock acquired", "key", key.Lock(), "wait", time.Since(lockStart))
 	defer func() {
 		uctx, ucancel := context.WithTimeout(context.WithoutCancel(ctx), s.unlockTimeout)
 		defer ucancel()
@@ -389,13 +395,17 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 		}
 		if found {
 			s.obs.CacheLookup(kind, "hit_after_lock")
+			tr.Add("cache", "another pod filled the entry while waiting for the lock; no upstream call", "status", string(env.Status))
 			outcome = "hit_after_lock"
 			e, err := s.cachedEntry(env, false)
 			return loadResult{entry: e, err: err}
 		}
 	}
 
+	tr.Add("cache", "calling upstream", "load_timeout", s.loadTimeout.String())
+	fetchStart := time.Now()
 	data, ferr := fetch(ctx)
+	tr.Add("cache", "upstream finished", "duration", time.Since(fetchStart), "error", ferr)
 	env := Envelope{SchemaVersion: SchemaVersion, FetchedAt: s.now().UTC()}
 	if ferr == nil {
 		env.Status, env.Data = StatusOK, data
@@ -407,6 +417,7 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 		env.Status, env.ErrorCode = v.Status, v.Code
 	}
 	outcome = string(env.Status)
+	tr.Add("cache", "storing result", "status", string(env.Status), "ttl", s.ttls.For(key.Kind, env.Status).String(), "error_code", env.ErrorCode)
 	s.store(ctx, key, env)
 
 	e := Entry{Envelope: env}
@@ -446,4 +457,57 @@ func (s *Store) lockDelay(int) time.Duration {
 		return s.lockDelayMin
 	}
 	return s.lockDelayMin + rand.N(span)
+}
+
+// Info describes the Redis state of one key, for debugging.
+type Info struct {
+	CacheKey           string    `json:"cache_key"`
+	LockKey            string    `json:"lock_key"`
+	CooldownKey        string    `json:"cooldown_key"`
+	Exists             bool      `json:"exists"`
+	Status             Status    `json:"status,omitempty"`
+	ErrorCode          string    `json:"error_code,omitempty"`
+	FetchedAt          time.Time `json:"fetched_at,omitzero"`
+	AgeSeconds         float64   `json:"age_seconds,omitempty"`
+	TTLSeconds         float64   `json:"ttl_seconds"` // -1 when the key does not exist or has no expiry
+	SizeBytes          int       `json:"size_bytes,omitempty"`
+	LockHeld           bool      `json:"lock_held"`
+	CooldownTTLSeconds float64   `json:"cooldown_ttl_seconds"` // -1 when no cooldown is active
+}
+
+// Inspect reports the cache entry, its TTL, the lock and the refresh cooldown of key.
+func (s *Store) Inspect(ctx context.Context, key Key) (Info, error) {
+	info := Info{CacheKey: key.Cache(), LockKey: key.Lock(), CooldownKey: key.Cooldown(), TTLSeconds: -1, CooldownTTLSeconds: -1}
+	b, err := s.rdb.Get(ctx, key.Cache()).Bytes()
+	switch {
+	case errors.Is(err, redis.Nil):
+	case err != nil:
+		return info, fmt.Errorf("%w: inspect: %w", ErrStoreUnavailable, err)
+	default:
+		info.Exists, info.SizeBytes = true, len(b)
+		if env, derr := DecodeEnvelope(b); derr == nil {
+			info.Status, info.ErrorCode, info.FetchedAt = env.Status, env.ErrorCode, env.FetchedAt
+			info.AgeSeconds = s.now().Sub(env.FetchedAt).Seconds()
+		}
+		if ttl, terr := s.rdb.PTTL(ctx, key.Cache()).Result(); terr == nil && ttl > 0 {
+			info.TTLSeconds = ttl.Seconds()
+		}
+	}
+	if ttl, terr := s.rdb.PTTL(ctx, key.Cooldown()).Result(); terr == nil && ttl > 0 {
+		info.CooldownTTLSeconds = ttl.Seconds()
+	}
+	if n, lerr := s.rdb.Exists(ctx, key.Lock()).Result(); lerr == nil {
+		info.LockHeld = n > 0
+	}
+	return info, nil
+}
+
+// Flush deletes the cache entry and the refresh cooldown of key (never the lock).
+// It returns the number of deleted keys.
+func (s *Store) Flush(ctx context.Context, key Key) (int64, error) {
+	n, err := s.rdb.Del(ctx, key.Cache(), key.Cooldown()).Result()
+	if err != nil {
+		return 0, fmt.Errorf("%w: flush: %w", ErrStoreUnavailable, err)
+	}
+	return n, nil
 }

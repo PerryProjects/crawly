@@ -272,6 +272,7 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | `protect.max_tracked_keys` | `SITEINFO_PROTECT_MAX_TRACKED_KEYS` | `100000` | bound on limiter memory |
 | `protect.max_concurrent_loads` | `SITEINFO_PROTECT_MAX_CONCURRENT_LOADS` | `16` | concurrent upstream loads per pod, `0` = off |
 | `protect.load_rate` / `load_burst` | `SITEINFO_PROTECT_LOAD_RATE` / `…_LOAD_BURST` | `2` / `10` | upstream loads (cache misses) per second per pod, `0` = off |
+| `debug.enabled` | `SITEINFO_DEBUG_ENABLED` | `false` | debug aids (`debug=1` traces, cache flush, config view); **never in production** |
 | `otel.exporter` | `SITEINFO_OTEL_EXPORTER` | `otlp` | `otlp`, `stdout` or `none` |
 | `otel.endpoint` | `SITEINFO_OTEL_ENDPOINT` | – | OTLP/HTTP base URL (`http://collector:4318`); empty = standard `OTEL_EXPORTER_OTLP_*` env / `localhost:4318` |
 | `otel.interval` | `SITEINFO_OTEL_INTERVAL` | `30s` | export interval |
@@ -362,7 +363,7 @@ make build            # static binary in bin/
 make race             # go test -race -count=1 ./...
 make lint             # golangci-lint v2 (see below)
 make check            # build + vet + race + lint
-FIRECRAWL_API_KEY=fc-... docker compose up --build   # Redis (single node) + service
+cp .env.example .env && docker compose up --build   # Redis + service + debug UI on http://localhost:8081
 ```
 
 - **Lint needs golangci-lint v2.** v1.x (e.g. 1.64.8) cannot read Go 1.27 export data and fails with
@@ -384,6 +385,34 @@ FIRECRAWL_API_KEY=fc-... docker compose up --build   # Redis (single node) + ser
   `SITEINFO_TEST_REDIS_CLUSTER=127.0.0.1:7000 go test -tags integration -run Cluster ./internal/cache/`.
   It was run once against a 3-master cluster (hash-tag slot affinity and one-load-per-host both passed).
 - Verified library APIs are written down in [`docs/VERIFIED_APIS.md`](docs/VERIFIED_APIS.md).
+
+## Debug UI
+
+`docker compose up --build` starts Redis, the service (debug mode on) and a small Vue page on **http://localhost:8081**
+(everything is bound to 127.0.0.1). Put your Firecrawl key in `.env` (`cp .env.example .env`, git-ignored). Enter a site
+URL and press *Impressum*, *Brand* or *Beide*:
+
+- **Result**: the imprint fields as a table (missing values as `—`), validation warnings, the raw imprint text; for brand
+  the logo/favicon/OG image, color swatches, fonts, tone of voice.
+- **Status bar**: HTTP status, `X-Cache`, `Retry-After`, browser and server duration, how old the cached data is, the request
+  id (to find the log lines), and for errors the error code with an explanation of what it usually means.
+- **Trace**: the timeline of that request: URL normalization, cache hit/miss, lock, every Firecrawl call (formats, attempt,
+  duration, queue wait, outcome, `Retry-After`), the page received (status code, markdown size, links), the ranked imprint
+  link candidates with scores, why a candidate was accepted or rejected, validation warnings, what gets stored and for how
+  long. A trace only exists for the request that actually ran the load; for a cache hit use *Cache vorher leeren*.
+- **Cache**: the Redis state of the key (status, age, TTL, size, whether the lock is held, refresh cooldown).
+- **Header / JSON / curl**: raw response headers, the full JSON, and a ready-to-run curl command.
+- **Konfiguration** shows the effective config (secrets masked) and runtime facts; the page also polls `/readyz`.
+
+How it works: the page talks to `/api/*` of its own nginx container, which proxies to the service and adds the bearer
+token (`API_TOKEN`, shared with `SITEINFO_AUTH_TOKENS`), so the browser never sees it. Vue is vendored
+(`web/debug/vendor`, Vue 3.5.13) so no CDN and no build step is needed.
+
+The service side is `debug.enabled`: `?debug=1` on `/v1/imprint` and `/v1/brand` adds a `_debug` object (trace, cache info,
+timings) to the response, also on errors; `DELETE /v1/debug/cache?url=…[&kind=imprint|brand]` removes the cache entries and
+refresh cooldown of a host; `GET /v1/debug/config` returns the redacted config. They sit behind the normal authentication,
+but they reveal internals and delete cache entries, so they are off by default and the compose file is the only place that
+turns them on.
 
 ## Assumptions and limitations
 

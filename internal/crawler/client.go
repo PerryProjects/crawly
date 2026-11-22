@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -117,9 +118,12 @@ func NewSDK(apiKey, apiURL string) (*firecrawl.Client, error) {
 func (c *Client) Scrape(ctx context.Context, url string, req ScrapeRequest) (*Page, error) {
 	opts := c.options(req)
 	for attempt := 0; ; attempt++ {
-		doc, retryAfter, err := c.attempt(ctx, url, opts)
+		doc, retryAfter, err := c.attempt(ctx, url, opts, attempt+1, req)
 		if err == nil {
-			return toPage(url, doc), nil
+			p := toPage(url, doc)
+			observability.TraceFrom(ctx).Add("crawler", "page received", "url", p.URL, "status_code", p.StatusCode,
+				"markdown_bytes", len(p.Markdown), "links", len(p.Links), "has_json", p.JSON != nil, "has_branding", p.Branding != nil)
+			return p, nil
 		}
 		if !retryable(err) || attempt >= c.maxRetries || ctx.Err() != nil {
 			return nil, err
@@ -139,13 +143,18 @@ func (c *Client) Scrape(ctx context.Context, url string, req ScrapeRequest) (*Pa
 }
 
 // attempt performs one semaphore-guarded call.
-func (c *Client) attempt(ctx context.Context, url string, opts *firecrawl.ScrapeOptions) (*firecrawl.Document, time.Duration, error) {
+func (c *Client) attempt(ctx context.Context, url string, opts *firecrawl.ScrapeOptions, n int, req ScrapeRequest) (*firecrawl.Document, time.Duration, error) {
+	tr := observability.TraceFrom(ctx)
+	queued := time.Now()
 	select {
 	case c.sem <- struct{}{}:
 		defer func() { <-c.sem }()
 	case <-ctx.Done():
+		tr.Add("crawler", "gave up waiting for a free upstream slot", "url", url, "waited", time.Since(queued))
 		return nil, 0, ctx.Err()
 	}
+	waited := time.Since(queued)
+	callStart := time.Now()
 
 	box := &retryAfterBox{}
 	callCtx, cancel := context.WithTimeout(context.WithValue(ctx, retryAfterKey{}, box), c.timeout)
@@ -154,6 +163,8 @@ func (c *Client) attempt(ctx context.Context, url string, opts *firecrawl.Scrape
 	doc, err := c.sc.Scrape(callCtx, url, opts)
 	outcome, err := classify(ctx, err)
 	c.obs.UpstreamCall(outcome)
+	tr.Add("crawler", "firecrawl call", "url", url, "attempt", n, "outcome", outcome, "duration", time.Since(callStart),
+		"queue_wait", waited, "formats", describeRequest(req), "retry_after", box.get(), "error", err)
 	return doc, box.get(), err
 }
 
@@ -299,4 +310,18 @@ func parseRetryAfter(v string, now time.Time) time.Duration {
 		return max(at.Sub(now), 0)
 	}
 	return 0
+}
+
+// describeRequest lists what a request asks for, for the debug trace.
+func describeRequest(r ScrapeRequest) string {
+	var f []string
+	for _, x := range []struct {
+		on   bool
+		name string
+	}{{r.Markdown, "markdown"}, {r.Links, "links"}, {r.Branding, "branding"}, {r.JSON != nil, "json"}, {r.FullPage, "full_page"}} {
+		if x.on {
+			f = append(f, x.name)
+		}
+	}
+	return strings.Join(f, ",")
 }
