@@ -140,11 +140,11 @@ consumed when the refresh starts, so a failed refresh also starts the cooldown (
    | Register type | DE: `HRA HRB GnR PR VR` (case-normalized), AT: `FN`; type must belong to the country |
    | DE register number | `^\d{1,7}( ?[A-Z]{1,3})?$` (e.g. `12345 B`) |
    | AT Firmenbuch number | `^\d{1,7} ?[a-z]$` (e.g. `123456a`) |
-   | Email | exactly one plain address, dotted domain (`net/mail`) |
+   | Email | exactly one plain address, dotted domain (`net/mail`); an invalid value is removed |
    | Postal code | DE 5 digits, AT/CH 4 digits |
    | Country | normalized to DE/AT/CH; anything else is dropped with a warning |
    | Missing core data | warns when `company_name` or the address is absent |
-   | **Grounding** | `company_name`, `email`, `vat_id`, register number and postal code must occur in the page text (case, whitespace and punctuation ignored); otherwise warn "not found verbatim" — a cheap guard against LLM invention |
+   | **Grounding** | `company_name`, `email`, `vat_id`, register number and postal code must occur in the page text (case, whitespace and punctuation ignored); otherwise a "not found verbatim" warning. **For identifiers (e-mail, phone, fax, VAT ID, register number) the value is removed**, not just flagged: observed live, the LLM composed `info@<shop-domain>` for a page without any e-mail address. Company name and postal code are only flagged |
 
    Valid VAT IDs are normalized (whitespace removed). Nothing else is rewritten.
 7. Response adds `imprint_url`, `fetched_at`, `cached`.

@@ -123,8 +123,12 @@ func TestValidateEmailPostalCountry(t *testing.T) {
 		t.Run("bad email "+name, func(t *testing.T) {
 			f := base()
 			f.Contact.Email = s(email)
-			if ws := Validate(f, ""); !hasWarning(ws, "contact.email") {
+			ws := Validate(f, "")
+			if !hasWarning(ws, "contact.email") {
 				t.Fatalf("no email warning for %q: %v", email, ws)
+			}
+			if f.Contact != nil && f.Contact.Email != nil {
+				t.Fatalf("invalid email %q must be removed", email)
 			}
 		})
 	}
@@ -181,10 +185,18 @@ func TestGroundingCheck(t *testing.T) {
 		Register:    &Register{Type: s("HRB"), Number: s("99999")},
 		Country:     s("DE"),
 	}
+	f.Contact.Phone = s("0800 000000")
 	ws := Validate(f, text)
-	for _, want := range []string{"company_name not found verbatim", "contact.email not found verbatim", "vat_id not found verbatim", "register.number not found verbatim", "postal_code not found"} {
+	for _, want := range []string{"company_name not found verbatim", "contact.email not found verbatim", "vat_id not found verbatim", "register.number not found verbatim", "contact.phone not found verbatim", "postal_code not found"} {
 		if !hasWarning(ws, want) {
 			t.Errorf("missing warning %q in %v", want, ws)
 		}
+	}
+	// Invented identifiers are removed, not just flagged; descriptive fields are only flagged.
+	if f.VATID != nil || f.Contact != nil || f.Register.Number != nil {
+		t.Errorf("ungrounded identifiers must be removed: vat=%v contact=%v register=%+v", f.VATID, f.Contact, f.Register)
+	}
+	if f.CompanyName == nil || f.Address == nil || f.Register.Type == nil {
+		t.Errorf("company name, address and register type must stay: %+v", f)
 	}
 }

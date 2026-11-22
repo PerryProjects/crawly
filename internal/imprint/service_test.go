@@ -193,8 +193,8 @@ func TestLookupWarnsAboutHallucinatedValues(t *testing.T) {
 	page.JSON["vat_id"] = "DE999999999"
 	site := &fakeSite{pages: map[string]*crawler.Page{"https://acme.de/": {URL: "https://acme.de/"}, "https://acme.de/impressum": page}}
 	imp, err := newSvc(site).Lookup(context.Background(), "acme.de")
-	if err != nil || !hasWarning(imp.Warnings, "vat_id not found verbatim") {
-		t.Fatalf("err=%v warnings=%v", err, imp.Warnings)
+	if err != nil || !hasWarning(imp.Warnings, "vat_id not found verbatim") || imp.VATID != nil {
+		t.Fatalf("err=%v vat=%v warnings=%v", err, imp.VATID, imp.Warnings)
 	}
 	if !strings.Contains(imp.Text, "DE123456789") {
 		t.Fatal("raw text must stay untouched")

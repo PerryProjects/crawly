@@ -66,12 +66,19 @@ func Validate(f *Fields, text string) []string {
 	validateVAT(f, text, country, warn)
 	validateRegister(f, text, country, warn)
 
-	if f.Contact != nil && f.Contact.Email != nil {
-		if !validEmail(*f.Contact.Email) {
-			warn("contact.email %q is not a valid single email address", *f.Contact.Email)
-		} else if !grounded(text, *f.Contact.Email) {
-			warn("contact.email not found verbatim in the imprint text (it may be obfuscated)")
+	if f.Contact != nil {
+		if f.Contact.Email != nil {
+			if !validEmail(*f.Contact.Email) {
+				warn("contact.email %q is not a valid single email address, value removed", *f.Contact.Email)
+				f.Contact.Email = nil
+			} else if !grounded(text, *f.Contact.Email) {
+				warn("contact.email not found verbatim in the imprint text, value removed")
+				f.Contact.Email = nil
+			}
 		}
+		dropUngrounded(text, "contact.phone", &f.Contact.Phone, warn)
+		dropUngrounded(text, "contact.fax", &f.Contact.Fax, warn)
+		f.Contact = nonEmpty(f.Contact)
 	}
 	if f.Address != nil && f.Address.PostalCode != nil {
 		pc := *f.Address.PostalCode
@@ -135,7 +142,18 @@ func validateVAT(f *Fields, text, country string, warn func(string, ...any)) {
 		warn("vat_id has a %s format but the imprint country is %s", vatCountry, country)
 	}
 	if !grounded(text, v) {
-		warn("vat_id not found verbatim in the imprint text")
+		warn("vat_id not found verbatim in the imprint text, value removed")
+		f.VATID = nil
+	}
+}
+
+// dropUngrounded removes identifiers that the model reports but that do not occur in the
+// page. Prompt rule: these are copied exactly, so a value that is not on the page was
+// invented (observed live: an e-mail address composed from the shop's domain).
+func dropUngrounded(text, name string, v **string, warn func(string, ...any)) {
+	if *v != nil && !grounded(text, **v) {
+		warn("%s not found verbatim in the imprint text, value removed", name)
+		*v = nil
 	}
 }
 
@@ -176,8 +194,9 @@ func validateRegister(f *Fields, text, country string, warn func(string, ...any)
 	if !known && r.Type == nil {
 		warn("register.number present without register.type")
 	}
-	if !grounded(text, *r.Number) {
-		warn("register.number not found verbatim in the imprint text")
+	dropUngrounded(text, "register.number", &r.Number, warn)
+	if *r == (Register{}) {
+		f.Register = nil
 	}
 }
 
