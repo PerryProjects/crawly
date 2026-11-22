@@ -64,3 +64,11 @@ Read from module source (not from memory) on 2026-11-22 with Go 1.27.2.
 - `branding`: keys `colorScheme, fonts[{family,role}], colors{primary,secondary,accent,background,textPrimary,link},
   typography{fontFamilies,fontStacks,fontSizes}, spacing, components, images{logo,favicon,ogImage,logoHref},
   personality{tone,energy,targetAudience}, designSystem, confidence, brandName, logo`. The logo may be a `data:image/svg+xml` URI.
+
+## Firecrawl map and credits (2026-11-22)
+- `(*Client).Map(ctx, url, *MapOptions{Search, Limit, Location, ...}) (*MapData, error)` → POST `/v2/map`;
+  `MapData.Links []LinkResult{URL, Title, Description}` (the SDK also accepts plain string links).
+- Credits (docs.firecrawl.dev/billing, features/scrape, features/map): scrape 1 credit per page, also when the target
+  answers 403/404 (a document comes back); `json` format +4; requests that return no document (e.g. DNS failure)
+  0; results from Firecrawl's cache still cost 1; `map` 1 credit per call regardless of `limit`. The `branding` format
+  has no documented surcharge, and a brand lookup (branding + json) was observed to cost 5 credits.

@@ -1,6 +1,5 @@
 .git
 bin
-deploy
 docs
 *.md
 coverage.out
