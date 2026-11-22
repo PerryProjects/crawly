@@ -23,7 +23,7 @@ import (
 	"github.com/perryprojects/siteinfo/internal/imprint"
 )
 
-func TestClassify(t *testing.T) {
+func testClassify(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
@@ -46,14 +46,14 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// fakeFirecrawl emulates POST /v2/scrape for acme.de. It does NOT prove
+// mockFirecrawl emulates POST /v2/scrape for acme.de. It does NOT prove
 // compatibility with the real service.
-type fakeFirecrawl struct {
+type mockFirecrawl struct {
 	calls atomic.Int32
 	gate  chan struct{} // when non-nil, the imprint page waits for it
 }
 
-func (f *fakeFirecrawl) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (f *mockFirecrawl) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(r.Body)
 	var req struct {
 		URL string `json:"url"`
@@ -108,9 +108,9 @@ func get(t *testing.T, url, token string) (code int, hdr http.Header, body map[s
 }
 
 // Full stack: real wiring, real Firecrawl SDK against a fake, miniredis, real listeners.
-func TestEndToEndAndGracefulShutdown(t *testing.T) {
+func testEndToEndAndGracefulShutdown(t *testing.T) {
 	mr := miniredis.RunT(t)
-	fc := &fakeFirecrawl{gate: make(chan struct{})}
+	fc := &mockFirecrawl{gate: make(chan struct{})}
 	fcSrv := httptest.NewServer(fc)
 	t.Cleanup(fcSrv.Close)
 
@@ -181,9 +181,9 @@ func TestEndToEndAndGracefulShutdown(t *testing.T) {
 	}
 }
 
-func TestServeAndCacheAcrossRequests(t *testing.T) {
+func testServeAndCacheAcrossRequests(t *testing.T) {
 	mr := miniredis.RunT(t)
-	fc := &fakeFirecrawl{}
+	fc := &mockFirecrawl{}
 	fcSrv := httptest.NewServer(fc)
 	t.Cleanup(fcSrv.Close)
 	otlp := &otlpCollector{}
@@ -266,7 +266,7 @@ func (c *otlpCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (c *otlpCollector) payload() string { c.mu.Lock(); defer c.mu.Unlock(); return string(c.body) }
 func (c *otlpCollector) path() string    { c.mu.Lock(); defer c.mu.Unlock(); return c.last }
 
-func TestNewFailsFastOnBusyPort(t *testing.T) {
+func testNewFailsFastOnBusyPort(t *testing.T) {
 	mr := miniredis.RunT(t)
 	cfg := testConfig(t, mr.Addr(), "http://127.0.0.1:1")
 	a, err := New(cfg, zap.NewNop())
@@ -279,4 +279,11 @@ func TestNewFailsFastOnBusyPort(t *testing.T) {
 	if _, err := New(&cfg2, zap.NewNop()); err == nil {
 		t.Fatal("expected a listen error")
 	}
+}
+
+func TestApp(t *testing.T) {
+	t.Run("classify", testClassify)
+	t.Run("end to end and graceful shutdown", testEndToEndAndGracefulShutdown)
+	t.Run("serve and cache across requests", testServeAndCacheAcrossRequests)
+	t.Run("new fails fast on busy port", testNewFailsFastOnBusyPort)
 }

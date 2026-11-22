@@ -15,7 +15,7 @@ func decode(t *testing.T, raw string) Fields {
 	return FieldsFromMap(m)
 }
 
-func TestFieldsFromMap(t *testing.T) {
+func testFieldsFromMap(t *testing.T) {
 	f := decode(t, `{
 		"company_name": "  ACME   GmbH ",
 		"legal_form": "N/A",
@@ -48,7 +48,7 @@ func TestFieldsFromMap(t *testing.T) {
 	}
 }
 
-func TestFieldsFromMapToleratesWrongTypes(t *testing.T) {
+func testFieldsFromMapToleratesWrongTypes(t *testing.T) {
 	f := decode(t, `{"company_name": ["a"], "address": "Musterstr. 1, Berlin", "represented_by": [1, "Max"], "vat_id": {"x": 1}}`)
 	if f.CompanyName != nil || f.Address != nil || f.VATID != nil {
 		t.Errorf("wrongly typed values must be nil: %+v", f)
@@ -61,7 +61,7 @@ func TestFieldsFromMapToleratesWrongTypes(t *testing.T) {
 	}
 }
 
-func TestNormalizeCountry(t *testing.T) {
+func testNormalizeCountry(t *testing.T) {
 	for _, tt := range [][2]string{
 		{"DE", "DE"}, {"  deutschland\t", "DE"}, {"Austria", "AT"}, {"Österreich", "AT"},
 		{"Schweiz", "CH"}, {"suisse", "CH"}, {"FR", ""}, {"", ""},
@@ -72,9 +72,16 @@ func TestNormalizeCountry(t *testing.T) {
 	}
 }
 
-func TestExtractionSchemaIsJSONSerializable(t *testing.T) {
+func testExtractionSchemaIsJSONSerializable(t *testing.T) {
 	b, err := json.Marshal(extractionSchema())
 	if err != nil || len(b) < 100 {
 		t.Fatalf("schema: %v (%d bytes)", err, len(b))
 	}
+}
+
+func TestFields(t *testing.T) {
+	t.Run("fields from map", testFieldsFromMap)
+	t.Run("fields from map tolerates wrong types", testFieldsFromMapToleratesWrongTypes)
+	t.Run("normalize country", testNormalizeCountry)
+	t.Run("extraction schema is JSON serializable", testExtractionSchemaIsJSONSerializable)
 }

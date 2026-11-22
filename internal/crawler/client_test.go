@@ -16,17 +16,17 @@ import (
 	"github.com/firecrawl/firecrawl/apps/go-sdk"
 )
 
-type fakeScraper struct {
+type mockScraper struct {
 	mu    sync.Mutex
 	calls int
 	fn    func(ctx context.Context, call int) (*firecrawl.Document, error)
 }
 
-func (f *fakeScraper) Map(context.Context, string, *firecrawl.MapOptions) (*firecrawl.MapData, error) {
+func (f *mockScraper) Map(context.Context, string, *firecrawl.MapOptions) (*firecrawl.MapData, error) {
 	return &firecrawl.MapData{}, nil
 }
 
-func (f *fakeScraper) Scrape(ctx context.Context, _ string, _ *firecrawl.ScrapeOptions) (*firecrawl.Document, error) {
+func (f *mockScraper) Scrape(ctx context.Context, _ string, _ *firecrawl.ScrapeOptions) (*firecrawl.Document, error) {
 	f.mu.Lock()
 	f.calls++
 	n := f.calls
@@ -34,12 +34,12 @@ func (f *fakeScraper) Scrape(ctx context.Context, _ string, _ *firecrawl.ScrapeO
 	return f.fn(ctx, n)
 }
 
-type obsRecorder struct {
+type mockObserver struct {
 	mu  sync.Mutex
 	got []string
 }
 
-func (o *obsRecorder) UpstreamCall(outcome string) {
+func (o *mockObserver) UpstreamCall(outcome string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.got = append(o.got, outcome)
@@ -65,7 +65,7 @@ func (s *sleeps) sleep(_ context.Context, d time.Duration) error {
 	return nil
 }
 
-func TestRetryAndErrorMapping(t *testing.T) {
+func testRetryAndErrorMapping(t *testing.T) {
 	okDoc := &firecrawl.Document{Markdown: "hello"}
 	tests := []struct {
 		name      string
@@ -92,13 +92,13 @@ func TestRetryAndErrorMapping(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fs := &fakeScraper{fn: func(_ context.Context, call int) (*firecrawl.Document, error) {
+			fs := &mockScraper{fn: func(_ context.Context, call int) (*firecrawl.Document, error) {
 				if err := tt.errs[call-1]; err != nil {
 					return nil, err
 				}
 				return okDoc, nil
 			}}
-			obs, sl := &obsRecorder{}, &sleeps{}
+			obs, sl := &mockObserver{}, &sleeps{}
 			c := New(fs, WithObserver(obs), WithSleep(sl.sleep), WithBackoff(100*time.Millisecond))
 			page, err := c.Scrape(context.Background(), "https://example.de/", ScrapeRequest{Markdown: true})
 			if tt.wantErr == nil {
@@ -132,8 +132,8 @@ func TestRetryAndErrorMapping(t *testing.T) {
 	}
 }
 
-func TestPerCallTimeoutIsUpstreamTimeout(t *testing.T) {
-	fs := &fakeScraper{fn: func(ctx context.Context, _ int) (*firecrawl.Document, error) {
+func testPerCallTimeoutIsUpstreamTimeout(t *testing.T) {
+	fs := &mockScraper{fn: func(ctx context.Context, _ int) (*firecrawl.Document, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}}
@@ -144,12 +144,12 @@ func TestPerCallTimeoutIsUpstreamTimeout(t *testing.T) {
 	}
 }
 
-func TestCallerCancellationIsNotAnUpstreamError(t *testing.T) {
-	fs := &fakeScraper{fn: func(ctx context.Context, _ int) (*firecrawl.Document, error) {
+func testCallerCancellationIsNotAnUpstreamError(t *testing.T) {
+	fs := &mockScraper{fn: func(ctx context.Context, _ int) (*firecrawl.Document, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}}
-	obs := &obsRecorder{}
+	obs := &mockObserver{}
 	c := New(fs, WithObserver(obs))
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(10*time.Millisecond, cancel)
@@ -162,8 +162,8 @@ func TestCallerCancellationIsNotAnUpstreamError(t *testing.T) {
 	}
 }
 
-func TestNoRetryWhenBudgetIsTooSmall(t *testing.T) {
-	fs := &fakeScraper{fn: func(context.Context, int) (*firecrawl.Document, error) { return nil, rateLimit() }}
+func testNoRetryWhenBudgetIsTooSmall(t *testing.T) {
+	fs := &mockScraper{fn: func(context.Context, int) (*firecrawl.Document, error) { return nil, rateLimit() }}
 	sl := &sleeps{}
 	c := New(fs, WithSleep(sl.sleep), WithBackoff(time.Hour))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -174,9 +174,9 @@ func TestNoRetryWhenBudgetIsTooSmall(t *testing.T) {
 	}
 }
 
-func TestSemaphoreLimitsConcurrency(t *testing.T) {
+func testSemaphoreLimitsConcurrency(t *testing.T) {
 	var cur, peak atomic.Int32
-	fs := &fakeScraper{fn: func(ctx context.Context, _ int) (*firecrawl.Document, error) {
+	fs := &mockScraper{fn: func(ctx context.Context, _ int) (*firecrawl.Document, error) {
 		n := cur.Add(1)
 		for {
 			p := peak.Load()
@@ -203,9 +203,9 @@ func TestSemaphoreLimitsConcurrency(t *testing.T) {
 	}
 }
 
-func TestSemaphoreWaitHonorsContext(t *testing.T) {
+func testSemaphoreWaitHonorsContext(t *testing.T) {
 	release := make(chan struct{})
-	fs := &fakeScraper{fn: func(ctx context.Context, _ int) (*firecrawl.Document, error) {
+	fs := &mockScraper{fn: func(ctx context.Context, _ int) (*firecrawl.Document, error) {
 		<-release
 		return &firecrawl.Document{}, nil
 	}}
@@ -233,7 +233,7 @@ func TestSemaphoreWaitHonorsContext(t *testing.T) {
 	close(release)
 }
 
-func TestToPage(t *testing.T) {
+func testToPage(t *testing.T) {
 	doc := &firecrawl.Document{
 		Markdown: "# x",
 		Links:    []string{"https://example.de/impressum"},
@@ -249,7 +249,7 @@ func TestToPage(t *testing.T) {
 	}
 }
 
-func TestParseRetryAfter(t *testing.T) {
+func testParseRetryAfter(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	tests := map[string]time.Duration{
 		"":                              0,
@@ -281,7 +281,7 @@ func newSDKClient(t *testing.T, h http.HandlerFunc, opts ...Option) *Client {
 	return New(sdk, opts...)
 }
 
-func TestSDKRequestShape(t *testing.T) {
+func testSDKRequestShape(t *testing.T) {
 	var body map[string]any
 	var auth string
 	c := newSDKClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -327,7 +327,7 @@ func TestSDKRequestShape(t *testing.T) {
 	}
 }
 
-func TestSDKRetryAfterIsHonored(t *testing.T) {
+func testSDKRetryAfterIsHonored(t *testing.T) {
 	var n atomic.Int32
 	sl := &sleeps{}
 	c := newSDKClient(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -347,7 +347,7 @@ func TestSDKRetryAfterIsHonored(t *testing.T) {
 	}
 }
 
-func TestSDKTransportErrorIsRetried(t *testing.T) {
+func testSDKTransportErrorIsRetried(t *testing.T) {
 	var n atomic.Int32
 	c := newSDKClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		if n.Add(1) == 1 {
@@ -364,7 +364,7 @@ func TestSDKTransportErrorIsRetried(t *testing.T) {
 	}
 }
 
-func TestSDK5xxIsAnOutageNotASiteFailure(t *testing.T) {
+func testSDK5xxIsAnOutageNotASiteFailure(t *testing.T) {
 	c := newSDKClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = io.WriteString(w, `{"error":"bad gateway"}`)
@@ -376,7 +376,7 @@ func TestSDK5xxIsAnOutageNotASiteFailure(t *testing.T) {
 	}
 }
 
-func TestErrorCode(t *testing.T) {
+func testErrorCode(t *testing.T) {
 	if ErrorCode(fmt.Errorf("%w: %w", ErrHostNotFound, ErrUpstream)) != CodeHostNotFound {
 		t.Fatal("host not found code")
 	}
@@ -388,7 +388,7 @@ func TestErrorCode(t *testing.T) {
 	}
 }
 
-func TestNoLocationByDefault(t *testing.T) {
+func testNoLocationByDefault(t *testing.T) {
 	var body map[string]any
 	c := newSDKClient(t, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -403,7 +403,7 @@ func TestNoLocationByDefault(t *testing.T) {
 	}
 }
 
-func TestFreshContextBypassesFirecrawlCache(t *testing.T) {
+func testFreshContextBypassesFirecrawlCache(t *testing.T) {
 	var bodies []map[string]any
 	c := newSDKClient(t, func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
@@ -426,8 +426,8 @@ func TestFreshContextBypassesFirecrawlCache(t *testing.T) {
 	}
 }
 
-func TestNoRetryThatTheDeadlineWouldCut(t *testing.T) {
-	fs := &fakeScraper{fn: func(context.Context, int) (*firecrawl.Document, error) { return nil, httpErr(500) }}
+func testNoRetryThatTheDeadlineWouldCut(t *testing.T) {
+	fs := &mockScraper{fn: func(context.Context, int) (*firecrawl.Document, error) { return nil, httpErr(500) }}
 	c := New(fs, WithTimeout(time.Second), WithSleep((&sleeps{}).sleep), WithBackoff(time.Millisecond))
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond) // less than one more call
 	defer cancel()
@@ -437,7 +437,7 @@ func TestNoRetryThatTheDeadlineWouldCut(t *testing.T) {
 	}
 }
 
-func TestPerRequestTimeout(t *testing.T) {
+func testPerRequestTimeout(t *testing.T) {
 	var body map[string]any
 	c := newSDKClient(t, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -452,7 +452,7 @@ func TestPerRequestTimeout(t *testing.T) {
 	}
 }
 
-func TestStoreInCacheOption(t *testing.T) {
+func testStoreInCacheOption(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		opts  []Option
@@ -481,7 +481,7 @@ func TestStoreInCacheOption(t *testing.T) {
 	}
 }
 
-func TestMapRequestAndResult(t *testing.T) {
+func testMapRequestAndResult(t *testing.T) {
 	var body map[string]any
 	var path string
 	c := newSDKClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -502,7 +502,7 @@ func TestMapRequestAndResult(t *testing.T) {
 	}
 }
 
-func TestLocationFollowsTheSiteCountry(t *testing.T) {
+func testLocationFollowsTheSiteCountry(t *testing.T) {
 	tests := []struct {
 		name, url, country string
 		opts               []Option
@@ -530,4 +530,39 @@ func TestLocationFollowsTheSiteCountry(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestErrorClassification(t *testing.T) {
+	t.Run("retry and error mapping", testRetryAndErrorMapping)
+	t.Run("error code", testErrorCode)
+	t.Run("per call timeout is upstream timeout", testPerCallTimeoutIsUpstreamTimeout)
+	t.Run("caller cancellation is not an upstream error", testCallerCancellationIsNotAnUpstreamError)
+	t.Run("SDK 5xx is an outage not a site failure", testSDK5xxIsAnOutageNotASiteFailure)
+}
+
+func TestRetries(t *testing.T) {
+	t.Run("no retry when budget is too small", testNoRetryWhenBudgetIsTooSmall)
+	t.Run("no retry that the deadline would cut", testNoRetryThatTheDeadlineWouldCut)
+	t.Run("SDK retry after is honored", testSDKRetryAfterIsHonored)
+	t.Run("SDK transport error is retried", testSDKTransportErrorIsRetried)
+	t.Run("parse retry after", testParseRetryAfter)
+}
+
+func TestConcurrencyLimit(t *testing.T) {
+	t.Run("semaphore limits concurrency", testSemaphoreLimitsConcurrency)
+	t.Run("semaphore wait honors context", testSemaphoreWaitHonorsContext)
+}
+
+func TestRequestOptions(t *testing.T) {
+	t.Run("SDK request shape", testSDKRequestShape)
+	t.Run("no location by default", testNoLocationByDefault)
+	t.Run("location follows the site country", testLocationFollowsTheSiteCountry)
+	t.Run("fresh context bypasses firecrawl cache", testFreshContextBypassesFirecrawlCache)
+	t.Run("per request timeout", testPerRequestTimeout)
+	t.Run("store in cache option", testStoreInCacheOption)
+}
+
+func TestResults(t *testing.T) {
+	t.Run("to page", testToPage)
+	t.Run("map request and result", testMapRequestAndResult)
 }

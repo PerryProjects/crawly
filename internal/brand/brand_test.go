@@ -50,7 +50,7 @@ func eq(t *testing.T, name string, got *string, want string) {
 	}
 }
 
-func TestMapFullFixture(t *testing.T) {
+func testMapFullFixture(t *testing.T) {
 	b := Map(fixturePage(t, map[string]any{
 		"description":   "ACME baut Raketen.",
 		"tone_of_voice": []any{"Professional", "friendly", "professional", "  ", "a very long keyword that exceeds thirty characters"},
@@ -80,7 +80,7 @@ func TestMapFullFixture(t *testing.T) {
 	}
 }
 
-func TestMapFallbacks(t *testing.T) {
+func testMapFallbacks(t *testing.T) {
 	// No LLM extraction: description and language fall back to page metadata, tone to Firecrawl's hint.
 	b := Map(fixturePage(t, nil), baseURL())
 	eq(t, "description", b.Description, "Meta description")
@@ -91,7 +91,7 @@ func TestMapFallbacks(t *testing.T) {
 	}
 }
 
-func TestMapEmptyAndHostile(t *testing.T) {
+func testMapEmptyAndHostile(t *testing.T) {
 	b := Map(&crawler.Page{}, baseURL())
 	if b.Logo != nil || b.Description != nil || b.ToneSource != nil || b.Fonts == nil || b.ToneOfVoice == nil || b.Typography.FontSizes == nil {
 		t.Fatalf("empty page must yield nulls and empty (non-nil) collections: %+v", b)
@@ -109,7 +109,7 @@ func TestMapEmptyAndHostile(t *testing.T) {
 	}
 }
 
-func TestDataURILogos(t *testing.T) {
+func testDataURILogos(t *testing.T) {
 	small := "data:image/svg+xml;utf8,%3Csvg%3E%3C/svg%3E"
 	big := "data:image/png;base64," + strings.Repeat("A", maxDataURI)
 	for name, tc := range map[string]struct{ in, want string }{
@@ -124,14 +124,14 @@ func TestDataURILogos(t *testing.T) {
 	eq(t, "brand name", Map(page, baseURL()).BrandName, "tagesschau.de")
 }
 
-func TestLookupFailsForErrorStatusHomepage(t *testing.T) {
-	fs := &fakeScraper{page: &crawler.Page{URL: "https://acme.de/", StatusCode: 503}}
+func testLookupFailsForErrorStatusHomepage(t *testing.T) {
+	fs := &mockScraper{page: &crawler.Page{URL: "https://acme.de/", StatusCode: 503}}
 	if _, err := NewService(fs).Lookup(context.Background(), "acme.de"); !errors.Is(err, crawler.ErrUpstream) {
 		t.Fatalf("err = %v", err)
 	}
 }
 
-func TestLanguageAndHelpers(t *testing.T) {
+func testLanguageAndHelpers(t *testing.T) {
 	for in, want := range map[string]string{"de": "de", "DE-at": "de", "en_US": "en", "deu": "deu", "german": "", "": ""} {
 		var p *string
 		if in != "" {
@@ -144,20 +144,20 @@ func TestLanguageAndHelpers(t *testing.T) {
 	}
 }
 
-type fakeScraper struct {
+type mockScraper struct {
 	page *crawler.Page
 	err  error
 	req  crawler.ScrapeRequest
 	url  string
 }
 
-func (f *fakeScraper) Scrape(_ context.Context, u string, req crawler.ScrapeRequest) (*crawler.Page, error) {
+func (f *mockScraper) Scrape(_ context.Context, u string, req crawler.ScrapeRequest) (*crawler.Page, error) {
 	f.url, f.req = u, req
 	return f.page, f.err
 }
 
-func TestServiceLookup(t *testing.T) {
-	fs := &fakeScraper{page: fixturePage(t, map[string]any{"description": "Hallo"})}
+func testServiceLookup(t *testing.T) {
+	fs := &mockScraper{page: fixturePage(t, map[string]any{"description": "Hallo"})}
 	b, err := NewService(fs).Lookup(context.Background(), "acme.de")
 	if err != nil {
 		t.Fatal(err)
@@ -167,26 +167,26 @@ func TestServiceLookup(t *testing.T) {
 		t.Fatalf("scrape request = %s %+v", fs.url, fs.req)
 	}
 
-	fs = &fakeScraper{err: crawler.ErrUpstreamTimeout}
+	fs = &mockScraper{err: crawler.ErrUpstreamTimeout}
 	if _, err := NewService(fs).Lookup(context.Background(), "acme.de"); !errors.Is(err, crawler.ErrUpstreamTimeout) {
 		t.Fatalf("err = %v", err)
 	}
 }
 
-func TestBrandPartialWhenUpstreamPartsAreMissing(t *testing.T) {
-	full := &fakeScraper{page: fixturePage(t, map[string]any{"description": "x"})}
+func testBrandPartialWhenUpstreamPartsAreMissing(t *testing.T) {
+	full := &mockScraper{page: fixturePage(t, map[string]any{"description": "x"})}
 	b, err := NewService(full).Lookup(context.Background(), "acme.de")
 	if err != nil || b.PartialResult() || len(b.Warnings) != 0 || b.Warnings == nil {
 		t.Fatalf("complete result: %+v %v", b.Warnings, err)
 	}
-	none := &fakeScraper{page: &crawler.Page{URL: "https://acme.de/", StatusCode: 200}}
+	none := &mockScraper{page: &crawler.Page{URL: "https://acme.de/", StatusCode: 200}}
 	b, err = NewService(none).Lookup(context.Background(), "acme.de")
 	if err != nil || !b.PartialResult() || len(b.Warnings) != 2 || b.Warnings[0].Code != WarnBrandingUnavailable {
 		t.Fatalf("degraded result: %+v %v", b.Warnings, err)
 	}
 }
 
-func TestSVGDataURIsWithActiveContentAreDropped(t *testing.T) {
+func testSVGDataURIsWithActiveContentAreDropped(t *testing.T) {
 	enc := func(svg string) string {
 		return "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString([]byte(svg))
 	}
@@ -213,4 +213,19 @@ func TestSVGDataURIsWithActiveContentAreDropped(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMap(t *testing.T) {
+	t.Run("map full fixture", testMapFullFixture)
+	t.Run("map fallbacks", testMapFallbacks)
+	t.Run("map empty and hostile", testMapEmptyAndHostile)
+	t.Run("data URI logos", testDataURILogos)
+	t.Run("SVG data UR is with active content are dropped", testSVGDataURIsWithActiveContentAreDropped)
+	t.Run("language and helpers", testLanguageAndHelpers)
+}
+
+func TestLookup(t *testing.T) {
+	t.Run("service lookup", testServiceLookup)
+	t.Run("lookup fails for error status homepage", testLookupFailsForErrorStatusHomepage)
+	t.Run("brand partial when upstream parts are missing", testBrandPartialWhenUpstreamPartsAreMissing)
 }

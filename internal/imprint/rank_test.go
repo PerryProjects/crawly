@@ -14,7 +14,7 @@ func urls(cs []Candidate) []string {
 	return out
 }
 
-func TestRankLinks(t *testing.T) {
+func testRankLinks(t *testing.T) {
 	base, _ := url.Parse("https://www.example.de/")
 	hosts := []string{"example.de", "www.example.de"}
 
@@ -102,7 +102,7 @@ func TestRankLinks(t *testing.T) {
 	}
 }
 
-func TestRankLinksFlagsExternalAndSubdomains(t *testing.T) {
+func testRankLinksFlagsExternalAndSubdomains(t *testing.T) {
 	base, _ := url.Parse("https://example.de/")
 	got := RankLinks([]string{"example.de"}, base, []Link{
 		{URL: "https://shop.example.de/impressum", Text: "Impressum"},
@@ -119,7 +119,7 @@ func TestRankLinksFlagsExternalAndSubdomains(t *testing.T) {
 	}
 }
 
-func TestMarkdownLinksAndMerge(t *testing.T) {
+func testMarkdownLinksAndMerge(t *testing.T) {
 	md := "Footer: [Impressum](https://example.de/impressum) | [Datenschutz](/datenschutz \"Privacy\") | ![logo](https://example.de/logo.png) | [Kontakt](<https://example.de/kontakt>)"
 	got := MarkdownLinks(md)
 	want := []Link{{"https://example.de/impressum", "Impressum"}, {"/datenschutz", "Datenschutz"}, {"https://example.de/kontakt", "Kontakt"}}
@@ -132,7 +132,7 @@ func TestMarkdownLinksAndMerge(t *testing.T) {
 	}
 }
 
-func TestRankLinksRejectsUnsafeTargets(t *testing.T) {
+func testRankLinksRejectsUnsafeTargets(t *testing.T) {
 	base, _ := url.Parse("https://acme.de/")
 	got := RankLinks([]string{"acme.de"}, base, []Link{
 		{URL: "http://10.0.0.12:8080/impressum", Text: "Impressum"},
@@ -148,7 +148,7 @@ func TestRankLinksRejectsUnsafeTargets(t *testing.T) {
 	}
 }
 
-func TestSameHostBeatsExternalEvenWithBetterPath(t *testing.T) {
+func testSameHostBeatsExternalEvenWithBetterPath(t *testing.T) {
 	base, _ := url.Parse("https://www.kessberlin.de/")
 	got := RankLinks([]string{"kessberlin.de"}, base, []Link{
 		{URL: "https://askstella.ai/imprint/", Text: "Impressum"},
@@ -157,4 +157,12 @@ func TestSameHostBeatsExternalEvenWithBetterPath(t *testing.T) {
 	if len(got) != 2 || got[0].URL != "https://www.kessberlin.de/policies/legal-notice" || !got[1].External {
 		t.Fatalf("got %+v", got)
 	}
+}
+
+func TestRanking(t *testing.T) {
+	t.Run("rank links", testRankLinks)
+	t.Run("rank links flags external and subdomains", testRankLinksFlagsExternalAndSubdomains)
+	t.Run("markdown links and merge", testMarkdownLinksAndMerge)
+	t.Run("rank links rejects unsafe targets", testRankLinksRejectsUnsafeTargets)
+	t.Run("same host beats external even with better path", testSameHostBeatsExternalEvenWithBetterPath)
 }

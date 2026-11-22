@@ -34,7 +34,7 @@ func debugServer(t *testing.T, opts ...Option) (srv *Server, lookupCalls *int) {
 			return cache.Verdict{}
 		}))
 	calls := new(int)
-	l := fakeLookups{
+	l := mockLookups{
 		imprintFn: func(ctx context.Context, host string) (*imprint.Imprint, error) {
 			*calls++
 			observability.TraceFrom(ctx).Add("crawler", "firecrawl call", "url", "https://"+host+"/", "outcome", "ok")
@@ -80,8 +80,8 @@ func hasStage(d map[string]any, sub string) bool {
 	return false
 }
 
-func TestDebugDisabledByDefault(t *testing.T) {
-	s := newTestServer(t, &fakeLoader{}, fakeLookups{})
+func testDebugDisabledByDefault(t *testing.T) {
+	s := newTestServer(t, &mockLoader{}, mockLookups{})
 	rec := do(t, s, http.MethodGet, "/v1/imprint?url=acme.de&debug=1", nil)
 	if rec.Code != 200 || strings.Contains(rec.Body.String(), "_debug") {
 		t.Fatalf("debug=1 must be ignored while debug mode is off: %d %s", rec.Code, rec.Body)
@@ -93,14 +93,14 @@ func TestDebugDisabledByDefault(t *testing.T) {
 	}
 }
 
-func TestDebugBlockOnlyWhenRequested(t *testing.T) {
+func testDebugBlockOnlyWhenRequested(t *testing.T) {
 	s, _ := debugServer(t)
 	if rec := do(t, s, http.MethodGet, "/v1/imprint?url=acme.de", nil); strings.Contains(rec.Body.String(), "_debug") {
 		t.Fatal("no _debug without debug=1")
 	}
 }
 
-func TestDebugTraceMissThenHit(t *testing.T) {
+func testDebugTraceMissThenHit(t *testing.T) {
 	s, calls := debugServer(t)
 	rec := do(t, s, http.MethodGet, "/v1/imprint?url=https://www.ACME.de/x&debug=1", nil)
 	if rec.Code != 200 {
@@ -142,7 +142,7 @@ func TestDebugTraceMissThenHit(t *testing.T) {
 	}
 }
 
-func TestDebugBlockOnErrors(t *testing.T) {
+func testDebugBlockOnErrors(t *testing.T) {
 	s, _ := debugServer(t)
 	rec := do(t, s, http.MethodGet, "/v1/imprint?url=broken.de&debug=1", nil)
 	if rec.Code != 502 || errCode(t, rec) != "upstream_error" {
@@ -169,7 +169,7 @@ func TestDebugBlockOnErrors(t *testing.T) {
 	}
 }
 
-func TestDebugFlushCache(t *testing.T) {
+func testDebugFlushCache(t *testing.T) {
 	s, calls := debugServer(t)
 	do(t, s, http.MethodGet, "/v1/imprint?url=acme.de", nil)
 	do(t, s, http.MethodGet, "/v1/imprint?url=acme.de", nil)
@@ -196,7 +196,7 @@ func TestDebugFlushCache(t *testing.T) {
 	}
 }
 
-func TestDebugConfigEndpoint(t *testing.T) {
+func testDebugConfigEndpoint(t *testing.T) {
 	s, _ := debugServer(t)
 	rec := do(t, s, http.MethodGet, "/v1/debug/config", nil)
 	body := decodeBody(t, rec)
@@ -215,8 +215,8 @@ func TestDebugConfigEndpoint(t *testing.T) {
 	}
 }
 
-func TestDebugWithLoaderWithoutInspection(t *testing.T) {
-	s := newTestServer(t, &fakeLoader{}, fakeLookups{}, WithDebug(map[string]any{}))
+func testDebugWithLoaderWithoutInspection(t *testing.T) {
+	s := newTestServer(t, &mockLoader{}, mockLookups{}, WithDebug(map[string]any{}))
 	rec := do(t, s, http.MethodGet, "/v1/imprint?url=acme.de&debug=1", nil)
 	d := debugOf(t, rec)
 	if rec.Code != 200 || d["cache"] != nil {
@@ -225,4 +225,14 @@ func TestDebugWithLoaderWithoutInspection(t *testing.T) {
 	if rec := do(t, s, http.MethodDelete, "/v1/cache?url=acme.de", nil); rec.Code != 404 {
 		t.Fatalf("flush on a loader without support = %d", rec.Code)
 	}
+}
+
+func TestDebugMode(t *testing.T) {
+	t.Run("debug disabled by default", testDebugDisabledByDefault)
+	t.Run("debug block only when requested", testDebugBlockOnlyWhenRequested)
+	t.Run("debug trace miss then hit", testDebugTraceMissThenHit)
+	t.Run("debug block on errors", testDebugBlockOnErrors)
+	t.Run("debug flush cache", testDebugFlushCache)
+	t.Run("debug config endpoint", testDebugConfigEndpoint)
+	t.Run("debug with loader without inspection", testDebugWithLoaderWithoutInspection)
 }

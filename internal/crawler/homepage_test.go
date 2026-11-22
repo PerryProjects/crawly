@@ -8,13 +8,13 @@ import (
 	"testing"
 )
 
-type scriptedCrawler struct {
+type mockCrawler struct {
 	calls []string
 	pages map[string]*Page
 	errs  map[string]error
 }
 
-func (s *scriptedCrawler) Scrape(_ context.Context, url string, _ ScrapeRequest) (*Page, error) {
+func (s *mockCrawler) Scrape(_ context.Context, url string, _ ScrapeRequest) (*Page, error) {
 	s.calls = append(s.calls, url)
 	if err := s.errs[url]; err != nil {
 		return nil, err
@@ -47,7 +47,7 @@ func TestScrapeHomepage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &scriptedCrawler{pages: tt.pages, errs: tt.errs}
+			c := &mockCrawler{pages: tt.pages, errs: tt.errs}
 			p, err := ScrapeHomepage(context.Background(), c, tt.host, ScrapeRequest{})
 			if !slices.Equal(c.calls, tt.wantCalls) {
 				t.Errorf("calls = %v, want %v", c.calls, tt.wantCalls)

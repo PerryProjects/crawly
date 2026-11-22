@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestNormalize(t *testing.T) {
+func testNormalize(t *testing.T) {
 	tests := []struct {
 		in       string
 		wantHost string
@@ -40,7 +40,7 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
-func TestNormalizeRejects(t *testing.T) {
+func testNormalizeRejects(t *testing.T) {
 	tests := map[string]string{
 		"empty":             "",
 		"spaces only":       "   ",
@@ -87,9 +87,15 @@ func TestNormalizeRejects(t *testing.T) {
 	}
 }
 
-func TestSchemelessInputWithURLInQuery(t *testing.T) {
+func testSchemelessInputWithURLInQuery(t *testing.T) {
 	got, err := Normalize("example.de/?r=https://x.de")
 	if err != nil || got.Host != "example.de" {
 		t.Fatalf("%+v %v", got, err)
 	}
+}
+
+func TestURLNorm(t *testing.T) {
+	t.Run("normalize", testNormalize)
+	t.Run("normalize rejects", testNormalizeRejects)
+	t.Run("schemeless input with URL in query", testSchemelessInputWithURLInQuery)
 }

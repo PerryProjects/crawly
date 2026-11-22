@@ -31,8 +31,8 @@ func doFrom(t *testing.T, s *Server, remote, target string, hdr map[string]strin
 	return rec
 }
 
-func TestSecurityHeaders(t *testing.T) {
-	s := newTestServer(t, &fakeLoader{}, fakeLookups{})
+func testSecurityHeaders(t *testing.T) {
+	s := newTestServer(t, &mockLoader{}, mockLookups{})
 	for _, path := range []string{"/healthz", lookupURL, "/v1/imprint?url=localhost", "/nope"} {
 		t.Run(path, func(t *testing.T) {
 			h := doFrom(t, s, "203.0.113.7:1", path, nil).Header()
@@ -48,7 +48,7 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 }
 
-func TestAnonymizeIP(t *testing.T) {
+func testAnonymizeIP(t *testing.T) {
 	for in, want := range map[string]string{
 		"203.0.113.77":               "203.0.113.0",
 		"::ffff:203.0.113.77":        "203.0.113.0",
@@ -63,16 +63,16 @@ func TestAnonymizeIP(t *testing.T) {
 	}
 }
 
-func TestInflightLimitShedsLoad(t *testing.T) {
+func testInflightLimitShedsLoad(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{}, 4)
-	l := fakeLookups{imprintFn: func(context.Context, string) (*imprint.Imprint, error) {
+	l := mockLookups{imprintFn: func(context.Context, string) (*imprint.Imprint, error) {
 		started <- struct{}{}
 		<-release
 		return sampleImprint(), nil
 	}}
-	obs := &recObserver{}
-	s := newTestServer(t, &fakeLoader{}, l, WithMaxInflight(1), WithObserver(obs), WithRetryAfter(3*time.Second))
+	obs := &mockObserver{}
+	s := newTestServer(t, &mockLoader{}, l, WithMaxInflight(1), WithObserver(obs), WithRetryAfter(3*time.Second))
 
 	first := make(chan int, 1)
 	go func() { first <- doFrom(t, s, "198.51.100.1:1", lookupURL, nil).Code }()
@@ -99,14 +99,20 @@ func TestInflightLimitShedsLoad(t *testing.T) {
 
 func BenchmarkAccessLog(b *testing.B) {
 	core := zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.AddSync(io.Discard), zapcore.InfoLevel)
-	l := fakeLookups{}
+	l := mockLookups{}
 	l.imprintFn = func(context.Context, string) (*imprint.Imprint, error) { return nil, nil }
 	l.brandFn = func(context.Context, string) (*brand.Brand, error) { return nil, nil }
-	s, _ := New(&fakeLoader{}, l.Imprint(), l.Brand(), pingFunc(okPing), nil, WithoutAuth(), WithLogger(zap.New(core)))
+	s, _ := New(&mockLoader{}, l.Imprint(), l.Brand(), pingFunc(okPing), nil, WithoutAuth(), WithLogger(zap.New(core)))
 	ctx := observability.WithRequestFields(context.Background(), &observability.RequestFields{RequestID: "abc123", Host: "acme.de", Kind: "imprint"})
 	e := &accessEntry{Method: "GET", Route: "/v1/imprint", RemoteIP: "203.0.113.7", Cache: "HIT", Status: 200, Bytes: 4321, Duration: 12 * time.Millisecond}
 	b.ReportAllocs()
 	for b.Loop() {
 		s.logAccess(ctx, e)
 	}
+}
+
+func TestHardening(t *testing.T) {
+	t.Run("security headers", testSecurityHeaders)
+	t.Run("anonymize IP", testAnonymizeIP)
+	t.Run("inflight limit sheds load", testInflightLimitShedsLoad)
 }

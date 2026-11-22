@@ -12,7 +12,7 @@ func hasWarning(ws []Warning, sub string) bool {
 	return slices.ContainsFunc(ws, func(w Warning) bool { return strings.Contains(w.Message, sub) || w.Code == sub })
 }
 
-func TestValidateVAT(t *testing.T) {
+func testValidateVAT(t *testing.T) {
 	tests := []struct {
 		name, vat, country string
 		wantVAT            string // normalized output
@@ -54,7 +54,7 @@ func TestValidateVAT(t *testing.T) {
 	}
 }
 
-func TestValidateRegister(t *testing.T) {
+func testValidateRegister(t *testing.T) {
 	tests := []struct {
 		name    string
 		country string
@@ -107,7 +107,7 @@ func TestValidateRegister(t *testing.T) {
 	}
 }
 
-func TestValidateEmailPostalCountry(t *testing.T) {
+func testValidateEmailPostalCountry(t *testing.T) {
 	base := func() *Fields {
 		return &Fields{CompanyName: s("ACME"), Address: &Address{PostalCode: s("10115")}, Contact: &Contact{Email: s("info@acme.de")}, Country: s("Deutschland")}
 	}
@@ -169,7 +169,7 @@ func TestValidateEmailPostalCountry(t *testing.T) {
 	})
 }
 
-func TestGroundingCheck(t *testing.T) {
+func testGroundingCheck(t *testing.T) {
 	text := "# Impressum\n\nACME Beispiel GmbH\nMusterstraße 1, 10115 Berlin\nTel. +49 (30) 123-456\nE-Mail: info@acme-beispiel.de\nUSt-IdNr.: DE 123 456 789\nHRB 12345 B"
 	f := &Fields{
 		CompanyName: s("ACME Beispiel GmbH"),
@@ -207,7 +207,7 @@ func TestGroundingCheck(t *testing.T) {
 	}
 }
 
-func TestWarningCodesAndFields(t *testing.T) {
+func testWarningCodesAndFields(t *testing.T) {
 	f := &Fields{
 		CompanyName: s("ACME GmbH"), Address: &Address{PostalCode: s("123")}, Country: s("DE"),
 		VATID: s("ATU12345678"), Contact: &Contact{Email: s("not-an-email")},
@@ -235,7 +235,7 @@ func TestWarningCodesAndFields(t *testing.T) {
 	}
 }
 
-func TestEmailDeobfuscation(t *testing.T) {
+func testEmailDeobfuscation(t *testing.T) {
 	tests := []struct {
 		page, extracted, want, code string
 	}{
@@ -262,7 +262,7 @@ func TestEmailDeobfuscation(t *testing.T) {
 	}
 }
 
-func TestLegalFormCasing(t *testing.T) {
+func testLegalFormCasing(t *testing.T) {
 	for in, want := range map[string]string{
 		"gmbh": "GmbH", "GMBH & CO. KG": "GmbH & Co. KG", "ug (haftungsbeschränkt)": "UG (haftungsbeschränkt)",
 		"e.k.": "e.K.", "GmbH": "GmbH", "Ltd.": "Ltd.", "Gesellschaft mit beschränkter Haftung": "Gesellschaft mit beschränkter Haftung",
@@ -275,7 +275,7 @@ func TestLegalFormCasing(t *testing.T) {
 	}
 }
 
-func TestRealWorldIdentifierSpellings(t *testing.T) {
+func testRealWorldIdentifierSpellings(t *testing.T) {
 	// got-bag.com: two VAT IDs in one line.
 	f := &Fields{CompanyName: s("GOT BAG GmbH"), Address: &Address{City: s("Berlin")}, Country: s("DE"), VATID: s("DE 326114858, CHE-276.969.644")}
 	ws := Validate(f, "GOT BAG GmbH USt-IdNr.: DE 326114858, CHE-276.969.644")
@@ -301,7 +301,7 @@ func TestRealWorldIdentifierSpellings(t *testing.T) {
 	}
 }
 
-func TestSwissUIDAsRegister(t *testing.T) {
+func testSwissUIDAsRegister(t *testing.T) {
 	f := &Fields{CompanyName: s("BLACKROLL AG"), Address: &Address{PostalCode: s("8598")}, Country: s("CH"),
 		Register: &Register{Court: s("Canton of Thurgau"), Number: s("CHE-228.574.355")}}
 	ws := Validate(f, "BLACKROLL AG 8598 UID: CHE-228.574.355")
@@ -310,7 +310,7 @@ func TestSwissUIDAsRegister(t *testing.T) {
 	}
 }
 
-func TestRegisterTypeFromPageText(t *testing.T) {
+func testRegisterTypeFromPageText(t *testing.T) {
 	f := &Fields{CompanyName: s("Bergfreunde GmbH"), Address: &Address{City: s("Berlin")}, Country: s("DE"), Register: &Register{Type: s("HR"), Number: s("382746")}}
 	ws := Validate(f, "Bergfreunde GmbH Handelsregisternummer: HR Amtsgericht Stuttgart Registernummer: HRB 382746")
 	if *f.Register.Type != "HRB" || !hasWarning(ws, WarnNormalized) || hasWarning(ws, WarnInvalidFormat) {
@@ -328,7 +328,7 @@ func TestRegisterTypeFromPageText(t *testing.T) {
 	}
 }
 
-func TestLiveSpellingsRound2(t *testing.T) {
+func testLiveSpellingsRound2(t *testing.T) {
 	// porsche.com: "HRB-Nr. 730623".
 	f := &Fields{CompanyName: s("Porsche AG"), Address: &Address{City: s("Berlin")}, Country: s("DE"), Register: &Register{Type: s("HRB"), Number: s("HRB-Nr. 730623")}}
 	if ws := Validate(f, "Porsche AG Registergericht: Amtsgericht Stuttgart HRB-Nr. 730623"); hasWarning(ws, WarnInvalidFormat) || *f.Register.Number != "730623" {
@@ -354,7 +354,7 @@ func TestLiveSpellingsRound2(t *testing.T) {
 	}
 }
 
-func TestCloudflareProtectedEmail(t *testing.T) {
+func testCloudflareProtectedEmail(t *testing.T) {
 	text := "BLACKROLL AG Email: [\\[email protected\\]](https://blackroll.com/cdn-cgi/l/email-protection#780b101708561c1d381a14191b130a171414561b1715)"
 	f := &Fields{CompanyName: s("BLACKROLL AG"), Address: &Address{City: s("x")}, Contact: &Contact{Email: s("[email protected]")}}
 	Validate(f, text)
@@ -363,7 +363,7 @@ func TestCloudflareProtectedEmail(t *testing.T) {
 	}
 }
 
-func TestPhoneGroundingIgnoresPrefixSpelling(t *testing.T) {
+func testPhoneGroundingIgnoresPrefixSpelling(t *testing.T) {
 	text := "Porsche AG Tel: (+49) 0711 911-0 Fax +41 (0)71 588 02 44"
 	for _, v := range []string{"+49 711 911-0", "(+49) 0711 911-0", "0711 9110", "+41 71 588 02 44"} {
 		if !phoneGrounded(text, v) {
@@ -375,4 +375,26 @@ func TestPhoneGroundingIgnoresPrefixSpelling(t *testing.T) {
 			t.Errorf("%q must not be grounded", v)
 		}
 	}
+}
+
+func TestValidateIdentifiers(t *testing.T) {
+	t.Run("validate VAT", testValidateVAT)
+	t.Run("validate register", testValidateRegister)
+	t.Run("real world identifier spellings", testRealWorldIdentifierSpellings)
+	t.Run("swiss UID as register", testSwissUIDAsRegister)
+	t.Run("register type from page text", testRegisterTypeFromPageText)
+	t.Run("live spellings round 2", testLiveSpellingsRound2)
+}
+
+func TestValidateContact(t *testing.T) {
+	t.Run("validate email postal country", testValidateEmailPostalCountry)
+	t.Run("email deobfuscation", testEmailDeobfuscation)
+	t.Run("cloudflare protected email", testCloudflareProtectedEmail)
+	t.Run("phone grounding ignores prefix spelling", testPhoneGroundingIgnoresPrefixSpelling)
+}
+
+func TestValidateGeneral(t *testing.T) {
+	t.Run("grounding check", testGroundingCheck)
+	t.Run("warning codes and fields", testWarningCodesAndFields)
+	t.Run("legal form casing", testLegalFormCasing)
 }

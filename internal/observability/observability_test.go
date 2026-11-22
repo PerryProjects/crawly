@@ -16,7 +16,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-func TestNewLogger(t *testing.T) {
+func testNewLogger(t *testing.T) {
 	if _, err := NewLogger("dev", "loud", Sampling{}); err == nil {
 		t.Fatal("invalid level must fail")
 	}
@@ -43,7 +43,7 @@ func TestNewLogger(t *testing.T) {
 	}
 }
 
-func TestProductionSampling(t *testing.T) {
+func testProductionSampling(t *testing.T) {
 	count := func(env string, s Sampling) int {
 		var buf bytes.Buffer
 		l, err := NewLoggerTo(env, "info", s, &buf)
@@ -69,7 +69,7 @@ func TestProductionSampling(t *testing.T) {
 	}
 }
 
-func TestRequestFields(t *testing.T) {
+func testRequestFields(t *testing.T) {
 	var buf bytes.Buffer
 	l, _ := NewLoggerTo("production", "info", Sampling{}, &buf)
 
@@ -150,7 +150,7 @@ func histCount(t *testing.T, m metricdata.Metrics, kv ...attribute.KeyValue) uin
 	return 0
 }
 
-func TestMetricsInstruments(t *testing.T) {
+func testMetricsInstruments(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	m, err := NewMetrics(reader, "siteinfo-test")
 	if err != nil {
@@ -215,7 +215,7 @@ func TestMetricsInstruments(t *testing.T) {
 	}
 }
 
-func TestMetricsWithoutExporterIsSafe(t *testing.T) {
+func testMetricsWithoutExporterIsSafe(t *testing.T) {
 	r, err := NewReader(context.Background(), MetricsConfig{Exporter: ExporterNone})
 	if err != nil || r != nil {
 		t.Fatalf("reader=%v err=%v", r, err)
@@ -235,7 +235,7 @@ func TestMetricsWithoutExporterIsSafe(t *testing.T) {
 }
 
 // The OTLP/HTTP exporter pushes protobuf to <endpoint>/v1/metrics.
-func TestOTLPExport(t *testing.T) {
+func testOTLPExport(t *testing.T) {
 	var gotPath, gotType atomic.Value
 	var body atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -271,4 +271,16 @@ func TestOTLPExport(t *testing.T) {
 	if err := m.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestLogger(t *testing.T) {
+	t.Run("new logger", testNewLogger)
+	t.Run("production sampling", testProductionSampling)
+	t.Run("request fields", testRequestFields)
+}
+
+func TestMetrics(t *testing.T) {
+	t.Run("metrics instruments", testMetricsInstruments)
+	t.Run("metrics without exporter is safe", testMetricsWithoutExporterIsSafe)
+	t.Run("OTLP export", testOTLPExport)
 }

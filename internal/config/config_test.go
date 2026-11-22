@@ -10,7 +10,7 @@ import (
 
 const testToken = "0123456789abcdef0123456789abcdef-token"
 
-func TestLoadDefaultsAndEnv(t *testing.T) {
+func testLoadDefaultsAndEnv(t *testing.T) {
 	t.Setenv("SITEINFO_AUTH_TOKENS", testToken+", second-token-0123456789abcdef0123456789")
 	t.Setenv("SITEINFO_FIRECRAWL_API_KEY", "fc-test")
 	t.Setenv("SITEINFO_CACHE_TTL_IMPRINT_OK", "48h")
@@ -56,7 +56,7 @@ func TestLoadDefaultsAndEnv(t *testing.T) {
 	}
 }
 
-func TestLoadFileThenEnvWins(t *testing.T) {
+func testLoadFileThenEnvWins(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.yaml")
 	yaml := "auth:\n  enabled: false\nserver:\n  addr: \":9999\"\ncache:\n  ttl:\n    error: 1m\n"
 	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
@@ -76,7 +76,7 @@ func TestLoadFileThenEnvWins(t *testing.T) {
 	}
 }
 
-func TestValidate(t *testing.T) {
+func testValidate(t *testing.T) {
 	valid := func() Config {
 		c := Default()
 		c.Auth.Tokens = []string{testToken}
@@ -127,4 +127,10 @@ func TestValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfig(t *testing.T) {
+	t.Run("load defaults and env", testLoadDefaultsAndEnv)
+	t.Run("load file then env wins", testLoadFileThenEnvWins)
+	t.Run("validate", testValidate)
 }

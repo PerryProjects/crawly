@@ -24,8 +24,8 @@ import (
 
 const token = "test-token-0123456789"
 
-// fakeLoader runs fetch inline and returns scripted results.
-type fakeLoader struct {
+// mockLoader runs fetch inline and returns scripted results.
+type mockLoader struct {
 	mu    sync.Mutex
 	opts  []cache.LoadOptions
 	keys  []cache.Key
@@ -34,7 +34,7 @@ type fakeLoader struct {
 	block bool         // wait for ctx.Done()
 }
 
-func (f *fakeLoader) Load(ctx context.Context, key cache.Key, fetch cache.FetchFunc, opt cache.LoadOptions) (cache.Entry, error) {
+func (f *mockLoader) Load(ctx context.Context, key cache.Key, fetch cache.FetchFunc, opt cache.LoadOptions) (cache.Entry, error) {
 	f.mu.Lock()
 	f.opts, f.keys = append(f.opts, opt), append(f.keys, key)
 	entry, err, block := f.entry, f.err, f.block
@@ -56,13 +56,13 @@ func (f *fakeLoader) Load(ctx context.Context, key cache.Key, fetch cache.FetchF
 	return cache.Entry{Envelope: cache.Envelope{SchemaVersion: 1, Status: cache.StatusOK, FetchedAt: time.Unix(1700000000, 0).UTC(), Data: fetched.Data, Partial: fetched.Partial}}, nil
 }
 
-type fakeLookups struct {
+type mockLookups struct {
 	imprintFn func(context.Context, string) (*imprint.Imprint, error)
 	brandFn   func(context.Context, string) (*brand.Brand, error)
 }
 
-func (f fakeLookups) Imprint() ImprintLookup { return imprintFunc(f.imprintFn) }
-func (f fakeLookups) Brand() BrandLookup     { return brandFunc(f.brandFn) }
+func (f mockLookups) Imprint() ImprintLookup { return imprintFunc(f.imprintFn) }
+func (f mockLookups) Brand() BrandLookup     { return brandFunc(f.brandFn) }
 
 type imprintFunc func(context.Context, string) (*imprint.Imprint, error)
 
@@ -91,7 +91,7 @@ func sampleImprint() *imprint.Imprint {
 	}
 }
 
-func newTestServer(t *testing.T, loader cache.Loader, l fakeLookups, opts ...Option) *Server {
+func newTestServer(t *testing.T, loader cache.Loader, l mockLookups, opts ...Option) *Server {
 	t.Helper()
 	if l.imprintFn == nil {
 		l.imprintFn = func(context.Context, string) (*imprint.Imprint, error) { return sampleImprint(), nil }
@@ -144,8 +144,8 @@ func errCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 	return e["code"].(string)
 }
 
-func TestImprintSuccess(t *testing.T) {
-	s := newTestServer(t, &fakeLoader{}, fakeLookups{})
+func testImprintSuccess(t *testing.T) {
+	s := newTestServer(t, &mockLoader{}, mockLookups{})
 	rec := do(t, s, http.MethodGet, "/v1/imprint?url=https://www.ACME.de/some/path?utm_source=x", nil)
 	if rec.Code != 200 || rec.Header().Get("X-Cache") != "MISS" {
 		t.Fatalf("status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body)
@@ -166,9 +166,9 @@ func TestImprintSuccess(t *testing.T) {
 	}
 }
 
-func TestBrandSuccessAndKey(t *testing.T) {
-	fl := &fakeLoader{}
-	s := newTestServer(t, fl, fakeLookups{})
+func testBrandSuccessAndKey(t *testing.T) {
+	fl := &mockLoader{}
+	s := newTestServer(t, fl, mockLookups{})
 	rec := do(t, s, http.MethodGet, "/v1/brand?url=acme.de", nil)
 	if rec.Code != 200 || decodeBody(t, rec)["description"] != "hi" {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
@@ -178,25 +178,25 @@ func TestBrandSuccessAndKey(t *testing.T) {
 	}
 }
 
-func TestCachedFlagAndHitHeader(t *testing.T) {
+func testCachedFlagAndHitHeader(t *testing.T) {
 	data, _ := json.Marshal(sampleImprint())
-	fl := &fakeLoader{entry: &cache.Entry{Envelope: cache.Envelope{Status: cache.StatusOK, FetchedAt: time.Unix(1700000000, 0).UTC(), Data: data}, Cached: true}}
-	rec := do(t, newTestServer(t, fl, fakeLookups{}), http.MethodGet, "/v1/imprint?url=acme.de", nil)
+	fl := &mockLoader{entry: &cache.Entry{Envelope: cache.Envelope{Status: cache.StatusOK, FetchedAt: time.Unix(1700000000, 0).UTC(), Data: data}, Cached: true}}
+	rec := do(t, newTestServer(t, fl, mockLookups{}), http.MethodGet, "/v1/imprint?url=acme.de", nil)
 	if rec.Header().Get("X-Cache") != "HIT" || decodeBody(t, rec)["cached"] != true {
 		t.Fatalf("headers=%v body=%s", rec.Header(), rec.Body)
 	}
 }
 
-func TestNegativeCachedImprintIs404(t *testing.T) {
-	fl := &fakeLoader{entry: &cache.Entry{Envelope: cache.Envelope{Status: cache.StatusNotFound}, Cached: true}}
-	rec := do(t, newTestServer(t, fl, fakeLookups{}), http.MethodGet, "/v1/imprint?url=acme.de", nil)
+func testNegativeCachedImprintIs404(t *testing.T) {
+	fl := &mockLoader{entry: &cache.Entry{Envelope: cache.Envelope{Status: cache.StatusNotFound}, Cached: true}}
+	rec := do(t, newTestServer(t, fl, mockLookups{}), http.MethodGet, "/v1/imprint?url=acme.de", nil)
 	if rec.Code != 404 || errCode(t, rec) != "imprint_not_found" || rec.Header().Get("X-Cache") != "HIT" {
 		t.Fatalf("status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body)
 	}
 }
 
 func TestAuth(t *testing.T) {
-	s := newTestServer(t, &fakeLoader{}, fakeLookups{})
+	s := newTestServer(t, &mockLoader{}, mockLookups{})
 	for name, hdr := range map[string]map[string]string{
 		"missing":      {"Authorization": ""},
 		"wrong":        {"Authorization": "Bearer nope"},
@@ -227,10 +227,10 @@ func TestAuth(t *testing.T) {
 		}
 	})
 	t.Run("multiple tokens", func(t *testing.T) {
-		l := fakeLookups{}
+		l := mockLookups{}
 		l.imprintFn = func(context.Context, string) (*imprint.Imprint, error) { return sampleImprint(), nil }
 		l.brandFn = func(context.Context, string) (*brand.Brand, error) { return &brand.Brand{}, nil }
-		s2, err := New(&fakeLoader{}, l.Imprint(), l.Brand(), pingFunc(okPing), []string{"first-token-0123456789", "second-token-0123456789"})
+		s2, err := New(&mockLoader{}, l.Imprint(), l.Brand(), pingFunc(okPing), []string{"first-token-0123456789", "second-token-0123456789"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -241,21 +241,21 @@ func TestAuth(t *testing.T) {
 		}
 	})
 	t.Run("disabled explicitly", func(t *testing.T) {
-		s3 := newTestServer(t, &fakeLoader{}, fakeLookups{}, WithoutAuth())
+		s3 := newTestServer(t, &mockLoader{}, mockLookups{}, WithoutAuth())
 		if rec := do(t, s3, http.MethodGet, "/v1/imprint?url=acme.de", map[string]string{"Authorization": ""}); rec.Code != 200 {
 			t.Fatalf("status = %d", rec.Code)
 		}
 	})
 	t.Run("no tokens without opt-out is an error", func(t *testing.T) {
-		l := fakeLookups{}
-		if _, err := New(&fakeLoader{}, l.Imprint(), l.Brand(), pingFunc(okPing), nil); !errors.Is(err, ErrNoTokens) {
+		l := mockLookups{}
+		if _, err := New(&mockLoader{}, l.Imprint(), l.Brand(), pingFunc(okPing), nil); !errors.Is(err, ErrNoTokens) {
 			t.Fatalf("err = %v", err)
 		}
 	})
 }
 
-func TestInvalidURLIs422(t *testing.T) {
-	s := newTestServer(t, &fakeLoader{}, fakeLookups{})
+func testInvalidURLIs422(t *testing.T) {
+	s := newTestServer(t, &mockLoader{}, mockLookups{})
 	for _, target := range []string{
 		"/v1/imprint", "/v1/imprint?url=", "/v1/imprint?url=http://localhost", "/v1/brand?url=ftp://x.de",
 		"/v1/imprint?url=https://user:pw@acme.de", "/v1/brand?url=http://192.168.1.1/",
@@ -267,7 +267,7 @@ func TestInvalidURLIs422(t *testing.T) {
 	}
 }
 
-func TestErrorMapping(t *testing.T) {
+func testErrorMapping(t *testing.T) {
 	tests := []struct {
 		name       string
 		err        error
@@ -293,7 +293,7 @@ func TestErrorMapping(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newTestServer(t, &fakeLoader{err: tt.err}, fakeLookups{}, WithRetryAfter(7*time.Second))
+			s := newTestServer(t, &mockLoader{err: tt.err}, mockLookups{}, WithRetryAfter(7*time.Second))
 			rec := do(t, s, http.MethodGet, "/v1/imprint?url=acme.de", nil)
 			if rec.Code != tt.wantStatus || errCode(t, rec) != tt.wantCode {
 				t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
@@ -308,14 +308,14 @@ func TestErrorMapping(t *testing.T) {
 	}
 }
 
-func TestMapErrorStatusCoverage(t *testing.T) {
+func testMapErrorStatusCoverage(t *testing.T) {
 	if got := mapError(urlnorm.ErrInvalidURL); got.status != 422 {
 		t.Fatalf("%+v", got)
 	}
 }
 
-func TestHandlerDeadlineIs504(t *testing.T) {
-	s := newTestServer(t, &fakeLoader{block: true}, fakeLookups{}, WithHandlerTimeout(30*time.Millisecond))
+func testHandlerDeadlineIs504(t *testing.T) {
+	s := newTestServer(t, &mockLoader{block: true}, mockLookups{}, WithHandlerTimeout(30*time.Millisecond))
 	start := time.Now()
 	rec := do(t, s, http.MethodGet, "/v1/imprint?url=acme.de", nil)
 	if rec.Code != 504 || errCode(t, rec) != "timeout" || time.Since(start) > 2*time.Second {
@@ -323,41 +323,41 @@ func TestHandlerDeadlineIs504(t *testing.T) {
 	}
 }
 
-func TestRefreshParameter(t *testing.T) {
+func testRefreshParameter(t *testing.T) {
 	t.Run("ignored when disabled", func(t *testing.T) {
-		fl := &fakeLoader{}
-		do(t, newTestServer(t, fl, fakeLookups{}), http.MethodGet, "/v1/imprint?url=acme.de&refresh=true", nil)
+		fl := &mockLoader{}
+		do(t, newTestServer(t, fl, mockLookups{}), http.MethodGet, "/v1/imprint?url=acme.de&refresh=true", nil)
 		if fl.opts[0].Refresh {
 			t.Fatal("refresh must be ignored while disabled")
 		}
 	})
 	t.Run("honored when enabled", func(t *testing.T) {
-		fl := &fakeLoader{}
-		do(t, newTestServer(t, fl, fakeLookups{}, WithRefresh(true)), http.MethodGet, "/v1/imprint?url=acme.de&refresh=true", nil)
+		fl := &mockLoader{}
+		do(t, newTestServer(t, fl, mockLookups{}, WithRefresh(true)), http.MethodGet, "/v1/imprint?url=acme.de&refresh=true", nil)
 		if !fl.opts[0].Refresh {
 			t.Fatal("refresh not passed through")
 		}
 	})
 	t.Run("invalid value", func(t *testing.T) {
-		rec := do(t, newTestServer(t, &fakeLoader{}, fakeLookups{}, WithRefresh(true)), http.MethodGet, "/v1/imprint?url=acme.de&refresh=maybe", nil)
+		rec := do(t, newTestServer(t, &mockLoader{}, mockLookups{}, WithRefresh(true)), http.MethodGet, "/v1/imprint?url=acme.de&refresh=maybe", nil)
 		if rec.Code != 422 || errCode(t, rec) != "invalid_parameter" {
 			t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
 		}
 	})
 	t.Run("throttled header", func(t *testing.T) {
 		data, _ := json.Marshal(sampleImprint())
-		fl := &fakeLoader{entry: &cache.Entry{Envelope: cache.Envelope{Status: cache.StatusOK, Data: data}, Cached: true, RefreshThrottled: true}}
-		rec := do(t, newTestServer(t, fl, fakeLookups{}, WithRefresh(true)), http.MethodGet, "/v1/imprint?url=acme.de&refresh=true", nil)
+		fl := &mockLoader{entry: &cache.Entry{Envelope: cache.Envelope{Status: cache.StatusOK, Data: data}, Cached: true, RefreshThrottled: true}}
+		rec := do(t, newTestServer(t, fl, mockLookups{}, WithRefresh(true)), http.MethodGet, "/v1/imprint?url=acme.de&refresh=true", nil)
 		if rec.Code != 200 || rec.Header().Get("X-Cache-Refresh") != "cooldown" || rec.Header().Get("X-Cache") != "HIT" {
 			t.Fatalf("status=%d headers=%v", rec.Code, rec.Header())
 		}
 	})
 }
 
-func TestProbes(t *testing.T) {
+func testProbes(t *testing.T) {
 	var pingErr error
-	l := fakeLookups{}
-	s, err := New(&fakeLoader{}, l.Imprint(), l.Brand(), pingFunc(func(context.Context) error { return pingErr }), []string{token})
+	l := mockLookups{}
+	s, err := New(&mockLoader{}, l.Imprint(), l.Brand(), pingFunc(func(context.Context) error { return pingErr }), []string{token})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,9 +381,9 @@ func TestProbes(t *testing.T) {
 	}
 }
 
-func TestPanicIsRecovered(t *testing.T) {
-	l := fakeLookups{imprintFn: func(context.Context, string) (*imprint.Imprint, error) { panic("kaboom") }}
-	s := newTestServer(t, &fakeLoader{}, l)
+func testPanicIsRecovered(t *testing.T) {
+	l := mockLookups{imprintFn: func(context.Context, string) (*imprint.Imprint, error) { panic("kaboom") }}
+	s := newTestServer(t, &mockLoader{}, l)
 	rec := do(t, s, http.MethodGet, "/v1/imprint?url=acme.de", nil)
 	if rec.Code != 500 || errCode(t, rec) != "internal_error" || strings.Contains(rec.Body.String(), "kaboom") {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
@@ -393,8 +393,8 @@ func TestPanicIsRecovered(t *testing.T) {
 	}
 }
 
-func TestRequestID(t *testing.T) {
-	s := newTestServer(t, &fakeLoader{}, fakeLookups{})
+func testRequestID(t *testing.T) {
+	s := newTestServer(t, &mockLoader{}, mockLookups{})
 	rec := do(t, s, http.MethodGet, "/healthz", map[string]string{"X-Request-Id": "abc-123_x.y"})
 	if rec.Header().Get("X-Request-Id") != "abc-123_x.y" {
 		t.Errorf("valid id must be echoed, got %q", rec.Header().Get("X-Request-Id"))
@@ -405,8 +405,8 @@ func TestRequestID(t *testing.T) {
 	}
 }
 
-func TestUnknownRouteAndMethod(t *testing.T) {
-	s := newTestServer(t, &fakeLoader{}, fakeLookups{})
+func testUnknownRouteAndMethod(t *testing.T) {
+	s := newTestServer(t, &mockLoader{}, mockLookups{})
 	if rec := do(t, s, http.MethodGet, "/nope", nil); rec.Code != 404 || errCode(t, rec) != "not_found" {
 		t.Fatalf("404: %d %s", rec.Code, rec.Body)
 	}
@@ -420,27 +420,27 @@ type recordedRequest struct {
 	status        int
 }
 
-type recObserver struct {
+type mockObserver struct {
 	mu       sync.Mutex
 	reqs     []recordedRequest
 	rejected []string
 }
 
-func (r *recObserver) Rejected(reason string) {
+func (r *mockObserver) Rejected(reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rejected = append(r.rejected, reason)
 }
 
-func (r *recObserver) ObserveRequest(route, method string, status int, _ time.Duration) {
+func (r *mockObserver) ObserveRequest(route, method string, status int, _ time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reqs = append(r.reqs, recordedRequest{route, method, status})
 }
 
-func TestMetricsUseRouteTemplates(t *testing.T) {
-	obs := &recObserver{}
-	s := newTestServer(t, &fakeLoader{}, fakeLookups{}, WithObserver(obs))
+func testMetricsUseRouteTemplates(t *testing.T) {
+	obs := &mockObserver{}
+	s := newTestServer(t, &mockLoader{}, mockLookups{}, WithObserver(obs))
 	do(t, s, http.MethodGet, "/v1/imprint?url=acme.de", nil)
 	do(t, s, http.MethodGet, "/v1/imprint?url=localhost", nil)
 	do(t, s, http.MethodGet, "/does/not/exist/123", nil)
@@ -451,7 +451,7 @@ func TestMetricsUseRouteTemplates(t *testing.T) {
 }
 
 // End to end with the real cache over miniredis (single node; miniredis has no cluster mode).
-func TestEndToEndWithRealCache(t *testing.T) {
+func testEndToEndWithRealCache(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
 	t.Cleanup(func() { _ = rdb.Close() })
@@ -469,7 +469,7 @@ func TestEndToEndWithRealCache(t *testing.T) {
 
 	var calls int
 	var mu sync.Mutex
-	l := fakeLookups{imprintFn: func(_ context.Context, host string) (*imprint.Imprint, error) {
+	l := mockLookups{imprintFn: func(_ context.Context, host string) (*imprint.Imprint, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		calls++
@@ -525,4 +525,28 @@ func TestEndToEndWithRealCache(t *testing.T) {
 	if rec := do(t, s, http.MethodGet, "/v1/imprint?url=acme.de", nil); rec.Code != 503 || rec.Header().Get("Retry-After") == "" {
 		t.Fatalf("lookup with redis down = %d %v", rec.Code, rec.Header())
 	}
+}
+
+func TestLookups(t *testing.T) {
+	t.Run("imprint success", testImprintSuccess)
+	t.Run("brand success and key", testBrandSuccessAndKey)
+	t.Run("cached flag and hit header", testCachedFlagAndHitHeader)
+	t.Run("negative cached imprint is 404", testNegativeCachedImprintIs404)
+	t.Run("refresh parameter", testRefreshParameter)
+	t.Run("end to end with real cache", testEndToEndWithRealCache)
+}
+
+func TestErrors(t *testing.T) {
+	t.Run("invalid URL is 422", testInvalidURLIs422)
+	t.Run("error mapping", testErrorMapping)
+	t.Run("map error status coverage", testMapErrorStatusCoverage)
+	t.Run("handler deadline is 504", testHandlerDeadlineIs504)
+	t.Run("panic is recovered", testPanicIsRecovered)
+	t.Run("unknown route and method", testUnknownRouteAndMethod)
+}
+
+func TestOperations(t *testing.T) {
+	t.Run("probes", testProbes)
+	t.Run("request ID", testRequestID)
+	t.Run("metrics use route templates", testMetricsUseRouteTemplates)
 }

@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestTraceNilIsSafe(t *testing.T) {
+func testTraceNilIsSafe(t *testing.T) {
 	var tr *Trace
 	tr.Add("x", "y", "k", 1)
 	if tr.Events() != nil {
@@ -19,7 +19,7 @@ func TestTraceNilIsSafe(t *testing.T) {
 	}
 }
 
-func TestTraceRecordsAndNormalizesValues(t *testing.T) {
+func testTraceRecordsAndNormalizesValues(t *testing.T) {
 	tr := NewTrace()
 	ctx := WithTrace(context.Background(), tr)
 	// The trace must survive context.WithoutCancel (detached cache loads).
@@ -44,7 +44,7 @@ func TestTraceRecordsAndNormalizesValues(t *testing.T) {
 	}
 }
 
-func TestTraceIsBounded(t *testing.T) {
+func testTraceIsBounded(t *testing.T) {
 	tr := NewTrace()
 	for range maxTraceEvents + 50 {
 		tr.Add("s", "m")
@@ -52,4 +52,10 @@ func TestTraceIsBounded(t *testing.T) {
 	if n := len(tr.Events()); n != maxTraceEvents {
 		t.Fatalf("events = %d, want cap %d", n, maxTraceEvents)
 	}
+}
+
+func TestTrace(t *testing.T) {
+	t.Run("trace nil is safe", testTraceNilIsSafe)
+	t.Run("trace records and normalizes values", testTraceRecordsAndNormalizesValues)
+	t.Run("trace is bounded", testTraceIsBounded)
 }

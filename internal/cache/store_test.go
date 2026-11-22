@@ -19,12 +19,12 @@ import (
 
 var errUpstream = errors.New("upstream broke")
 
-type recorder struct {
+type mockObserver struct {
 	mu     sync.Mutex
 	counts map[string]int
 }
 
-func (r *recorder) inc(k string) {
+func (r *mockObserver) inc(k string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.counts == nil {
@@ -32,26 +32,26 @@ func (r *recorder) inc(k string) {
 	}
 	r.counts[k]++
 }
-func (r *recorder) get(k string) int {
+func (r *mockObserver) get(k string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.counts[k]
 }
 
-func (r *recorder) CacheLookup(_, outcome string)              { r.inc("lookup:" + outcome) }
-func (r *recorder) SingleflightShared(string)                  { r.inc("shared") }
-func (r *recorder) LockWait(_, result string, _ time.Duration) { r.inc("lock:" + result) }
-func (r *recorder) LoadFinished(_, outcome string, _ time.Duration) {
+func (r *mockObserver) CacheLookup(_, outcome string)              { r.inc("lookup:" + outcome) }
+func (r *mockObserver) SingleflightShared(string)                  { r.inc("shared") }
+func (r *mockObserver) LockWait(_, result string, _ time.Duration) { r.inc("lock:" + result) }
+func (r *mockObserver) LoadFinished(_, outcome string, _ time.Duration) {
 	r.inc("load:" + outcome)
 }
-func (r *recorder) InflightLoads(int)      {}
-func (r *recorder) CacheWriteFailed()      { r.inc("writefail") }
-func (r *recorder) Rejected(reason string) { r.inc("rejected:" + reason) }
+func (r *mockObserver) InflightLoads(int)      {}
+func (r *mockObserver) CacheWriteFailed()      { r.inc("writefail") }
+func (r *mockObserver) Rejected(reason string) { r.inc("rejected:" + reason) }
 
 type env struct {
 	mr  *miniredis.Miniredis
 	rdb *redis.Client
-	rec *recorder
+	rec *mockObserver
 }
 
 func newEnv(t *testing.T) *env {
@@ -59,7 +59,7 @@ func newEnv(t *testing.T) *env {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
 	t.Cleanup(func() { _ = rdb.Close() })
-	return &env{mr: mr, rdb: rdb, rec: &recorder{}}
+	return &env{mr: mr, rdb: rdb, rec: &mockObserver{}}
 }
 
 func (e *env) store(opts ...Option) *Store {
@@ -110,7 +110,7 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 }
 
-func TestKeysUseHashTag(t *testing.T) {
+func testKeysUseHashTag(t *testing.T) {
 	k := Key{Kind: KindBrand, Host: "xn--bcher-kva.de"}
 	if k.Cache() != "brand:v2:{xn--bcher-kva.de}" || k.Lock() != "lock:brand:v2:{xn--bcher-kva.de}" {
 		t.Fatalf("keys: %s %s", k.Cache(), k.Lock())
@@ -120,7 +120,7 @@ func TestKeysUseHashTag(t *testing.T) {
 	}
 }
 
-func TestEnvelopeRoundTripAndValidation(t *testing.T) {
+func testEnvelopeRoundTripAndValidation(t *testing.T) {
 	in := Envelope{SchemaVersion: SchemaVersion, Status: StatusOK, FetchedAt: time.Unix(1700000000, 0).UTC(), Data: json.RawMessage(`{"a":1}`)}
 	b, err := in.Encode()
 	if err != nil {
@@ -148,7 +148,7 @@ func TestEnvelopeRoundTripAndValidation(t *testing.T) {
 }
 
 // N callers, spread over two "pods" sharing one Redis, must trigger exactly one upstream load.
-func TestConcurrentCallersTriggerOneUpstreamLoad(t *testing.T) {
+func testConcurrentCallersTriggerOneUpstreamLoad(t *testing.T) {
 	e := newEnv(t)
 	podA, podB := e.store(), e.store()
 	var calls atomic.Int32
@@ -195,7 +195,7 @@ func TestConcurrentCallersTriggerOneUpstreamLoad(t *testing.T) {
 	}
 }
 
-func TestCallerCancelDoesNotFailOthersAndCacheStillFills(t *testing.T) {
+func testCallerCancelDoesNotFailOthersAndCacheStillFills(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
 	var calls atomic.Int32
@@ -238,7 +238,7 @@ func TestCallerCancelDoesNotFailOthersAndCacheStillFills(t *testing.T) {
 	}
 }
 
-func TestLeaderCancelStillFillsCache(t *testing.T) {
+func testLeaderCancelStillFillsCache(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
 	var calls atomic.Int32
@@ -258,7 +258,7 @@ func TestLeaderCancelStillFillsCache(t *testing.T) {
 	waitFor(t, func() bool { return e.mr.Exists(testKey.Cache()) })
 }
 
-func TestDoubleCheckAfterLock(t *testing.T) {
+func testDoubleCheckAfterLock(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
 	other := redsync.New(redsyncgoredis.NewPool(e.rdb)).NewMutex(testKey.Lock(), redsync.WithExpiry(10*time.Second))
@@ -300,7 +300,7 @@ func TestDoubleCheckAfterLock(t *testing.T) {
 	}
 }
 
-func TestLockFailureIsTypedError(t *testing.T) {
+func testLockFailureIsTypedError(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(WithLoadTimeout(150*time.Millisecond), WithLockTTL(time.Second))
 	other := redsync.New(redsyncgoredis.NewPool(e.rdb)).NewMutex(testKey.Lock(), redsync.WithExpiry(30*time.Second))
@@ -320,7 +320,7 @@ func TestLockFailureIsTypedError(t *testing.T) {
 	}
 }
 
-func TestLockIsReleasedAfterLoad(t *testing.T) {
+func testLockIsReleasedAfterLoad(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
 	var calls atomic.Int32
@@ -335,7 +335,7 @@ func TestLockIsReleasedAfterLoad(t *testing.T) {
 	}
 }
 
-func TestNegativeCaching(t *testing.T) {
+func testNegativeCaching(t *testing.T) {
 	t.Run("error is cached and replayed as CachedError", func(t *testing.T) {
 		e := newEnv(t)
 		s := e.store()
@@ -391,7 +391,7 @@ func TestNegativeCaching(t *testing.T) {
 	})
 }
 
-func TestRefreshCooldown(t *testing.T) {
+func testRefreshCooldown(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(WithRefreshCooldown(time.Hour))
 	var calls atomic.Int32
@@ -415,7 +415,7 @@ func TestRefreshCooldown(t *testing.T) {
 	}
 }
 
-func TestFailedRefreshKeepsGoodEntry(t *testing.T) {
+func testFailedRefreshKeepsGoodEntry(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
 	var calls atomic.Int32
@@ -450,7 +450,7 @@ func TestFailedRefreshKeepsGoodEntry(t *testing.T) {
 	}
 }
 
-func TestRefreshOnEmptyCacheStillLoads(t *testing.T) {
+func testRefreshOnEmptyCacheStillLoads(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
 	var calls atomic.Int32
@@ -462,7 +462,7 @@ func TestRefreshOnEmptyCacheStillLoads(t *testing.T) {
 	}
 }
 
-func TestCorruptEntryIsRebuilt(t *testing.T) {
+func testCorruptEntryIsRebuilt(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
 	e.mr.Set(testKey.Cache(), "not json")
@@ -473,7 +473,7 @@ func TestCorruptEntryIsRebuilt(t *testing.T) {
 	}
 }
 
-func TestCloseWaitsForInflightLoads(t *testing.T) {
+func testCloseWaitsForInflightLoads(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
 	var calls atomic.Int32
@@ -510,7 +510,7 @@ func TestCloseWaitsForInflightLoads(t *testing.T) {
 	}
 }
 
-func TestRedisDownIsStoreUnavailable(t *testing.T) {
+func testRedisDownIsStoreUnavailable(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
 	e.mr.Close()
@@ -524,7 +524,7 @@ func TestRedisDownIsStoreUnavailable(t *testing.T) {
 	}
 }
 
-func TestFetchPanicBecomesError(t *testing.T) {
+func testFetchPanicBecomesError(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
 	_, err := s.Load(context.Background(), testKey, func(context.Context) (Fetched, error) { panic("boom") }, LoadOptions{})
@@ -536,7 +536,7 @@ func TestFetchPanicBecomesError(t *testing.T) {
 	}
 }
 
-func TestGetOrLoadTyped(t *testing.T) {
+func testGetOrLoadTyped(t *testing.T) {
 	type payload struct {
 		Name string `json:"name"`
 	}
@@ -562,7 +562,7 @@ func TestGetOrLoadTyped(t *testing.T) {
 	}
 }
 
-func TestLoadAdmissionConcurrencyLimit(t *testing.T) {
+func testLoadAdmissionConcurrencyLimit(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(WithLoadLimits(2, 0, 0))
 	var calls atomic.Int32
@@ -599,7 +599,7 @@ func TestLoadAdmissionConcurrencyLimit(t *testing.T) {
 	}
 }
 
-func TestLoadAdmissionRateLimit(t *testing.T) {
+func testLoadAdmissionRateLimit(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(WithLoadLimits(0, 0.001, 2)) // burst of 2, then effectively nothing
 	var calls atomic.Int32
@@ -621,7 +621,7 @@ func TestLoadAdmissionRateLimit(t *testing.T) {
 	}
 }
 
-func TestInspectAndFlush(t *testing.T) {
+func testInspectAndFlush(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(WithRefreshCooldown(time.Hour))
 	ctx := context.Background()
@@ -663,7 +663,7 @@ func TestInspectAndFlush(t *testing.T) {
 	}
 }
 
-func TestInspectRedisDown(t *testing.T) {
+func testInspectRedisDown(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
 	e.mr.Close()
@@ -682,7 +682,7 @@ type partialPayload struct {
 
 func (p partialPayload) PartialResult() bool { return p.Degrade }
 
-func TestPartialResultsGetTheShortTTL(t *testing.T) {
+func testPartialResultsGetTheShortTTL(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(WithTTLs(TTLs{ImprintOK: 30 * 24 * time.Hour, BrandOK: time.Hour, NotFound: time.Hour, Error: time.Minute, Partial: 2 * time.Hour}))
 	ctx := context.Background()
@@ -708,7 +708,7 @@ func TestPartialResultsGetTheShortTTL(t *testing.T) {
 	}
 }
 
-func TestLockIsExtendedWhileLoading(t *testing.T) {
+func testLockIsExtendedWhileLoading(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(WithLockTTL(300 * time.Millisecond))
 	other := redsync.New(redsyncgoredis.NewPool(e.rdb)).NewMutex(testKey.Lock(), redsync.WithExpiry(time.Second), redsync.WithTries(1))
@@ -743,4 +743,51 @@ func TestLockIsExtendedWhileLoading(t *testing.T) {
 	if e.mr.Exists(testKey.Lock()) {
 		t.Fatal("lock must be released after the load")
 	}
+}
+
+func TestKeysAndEnvelope(t *testing.T) {
+	t.Run("keys use hash tag", testKeysUseHashTag)
+	t.Run("envelope round trip and validation", testEnvelopeRoundTripAndValidation)
+}
+
+func TestLoadConcurrency(t *testing.T) {
+	t.Run("concurrent callers trigger one upstream load", testConcurrentCallersTriggerOneUpstreamLoad)
+	t.Run("caller cancel does not fail others and cache still fills", testCallerCancelDoesNotFailOthersAndCacheStillFills)
+	t.Run("leader cancel still fills cache", testLeaderCancelStillFillsCache)
+	t.Run("double check after lock", testDoubleCheckAfterLock)
+}
+
+func TestLoadLock(t *testing.T) {
+	t.Run("lock failure is typed error", testLockFailureIsTypedError)
+	t.Run("lock is released after load", testLockIsReleasedAfterLoad)
+	t.Run("lock is extended while loading", testLockIsExtendedWhileLoading)
+}
+
+func TestLoadCaching(t *testing.T) {
+	t.Run("negative caching", testNegativeCaching)
+	t.Run("partial results get the short TTL", testPartialResultsGetTheShortTTL)
+	t.Run("corrupt entry is rebuilt", testCorruptEntryIsRebuilt)
+	t.Run("get or load typed", testGetOrLoadTyped)
+}
+
+func TestLoadRefresh(t *testing.T) {
+	t.Run("refresh cooldown", testRefreshCooldown)
+	t.Run("failed refresh keeps good entry", testFailedRefreshKeepsGoodEntry)
+	t.Run("refresh on empty cache still loads", testRefreshOnEmptyCacheStillLoads)
+}
+
+func TestLoadAdmission(t *testing.T) {
+	t.Run("load admission concurrency limit", testLoadAdmissionConcurrencyLimit)
+	t.Run("load admission rate limit", testLoadAdmissionRateLimit)
+}
+
+func TestStoreFailures(t *testing.T) {
+	t.Run("redis down is store unavailable", testRedisDownIsStoreUnavailable)
+	t.Run("fetch panic becomes error", testFetchPanicBecomesError)
+	t.Run("close waits for inflight loads", testCloseWaitsForInflightLoads)
+}
+
+func TestInspection(t *testing.T) {
+	t.Run("inspect and flush", testInspectAndFlush)
+	t.Run("inspect redis down", testInspectRedisDown)
 }
