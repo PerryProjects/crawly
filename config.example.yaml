@@ -1,0 +1,25 @@
+# Example configuration. Every key can be overridden by an environment variable:
+# SITEINFO_ + the key path joined with "_" (e.g. SITEINFO_CACHE_TTL_IMPRINT_OK=720h).
+# Lists are comma separated (SITEINFO_AUTH_TOKENS=a,b). See README for the full table.
+#
+# This file is the LOCAL DEV setup (make run): single-node Redis, auth disabled,
+# self-hosted Firecrawl or the keyless free tier. Never use it as is in production.
+env: dev
+log_level: debug
+
+server:
+  addr: ":8080"
+  metrics_addr: ":9090"
+  shutdown_delay: 1s
+
+auth:
+  enabled: false
+  tokens: []
+
+redis:
+  mode: single
+  addrs: ["localhost:6379"]
+
+firecrawl:
+  # Cloud: set SITEINFO_FIRECRAWL_API_KEY. Self-hosted: point api_url at it and no key is needed.
+  api_url: "http://localhost:3002"

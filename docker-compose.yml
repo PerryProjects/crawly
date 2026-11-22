@@ -1,0 +1,31 @@
+# Local development: one single-node Redis plus the service.
+# Redis Cluster is used in production; local dev uses redis.mode=single.
+#   FIRECRAWL_API_KEY=fc-... docker compose up --build
+#   curl -H 'Authorization: Bearer dev-token-0123456789abcdef' 'localhost:8080/v1/imprint?url=https://example.de'
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]   # cache only, nothing is persisted
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  siteinfo:
+    build: .
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      SITEINFO_ENV: dev
+      SITEINFO_LOG_LEVEL: debug
+      SITEINFO_REDIS_MODE: single
+      SITEINFO_REDIS_ADDRS: redis:6379
+      SITEINFO_AUTH_TOKENS: dev-token-0123456789abcdef
+      SITEINFO_FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:?set FIRECRAWL_API_KEY}
+      SITEINFO_SERVER_SHUTDOWN_DELAY: 1s

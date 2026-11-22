@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: siteinfo
+  labels: {app.kubernetes.io/name: siteinfo}
+spec:
+  selector: {app.kubernetes.io/name: siteinfo}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+    # /metrics is deliberately not exposed through this Service; scrape the pods directly.
