@@ -79,6 +79,10 @@ func TestValidateRegister(t *testing.T) {
 		{"HRB in AT", "AT", "HRB", "12345", "HRB", "belongs to DE"},
 		{"CH is not pattern checked", "CH", "Handelsregister", "CH-020.3.123.456-7", "Handelsregister", ""},
 		{"number without type", "DE", "", "12345", "", "without register.type"},
+		{"type glued to number", "DE", "HRB", "hrb 104144", "HRB", ""},
+		{"glued number, no type given", "DE", "", "HRB 104144", "HRB", ""},
+		{"glued FN", "AT", "", "FN 123456a", "FN", ""},
+		{"glued number of another type", "DE", "HRA", "HRB 1234", "HRA", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

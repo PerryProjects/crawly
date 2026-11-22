@@ -25,6 +25,9 @@ var (
 	// AT Firmenbuch number: digits plus one check letter (e.g. "123456a").
 	reRegAT = regexp.MustCompile(`^\d{1,7} ?[A-Z]$`)
 
+	// A register type glued to the number ("HRB 104144", "FN123456a"), a common LLM habit.
+	reRegPrefixed = regexp.MustCompile(`(?i)^(HRA|HRB|GNR|PR|VR|FN)[.:\s]*(\d.*)$`)
+
 	rePostalDE = regexp.MustCompile(`^\d{5}$`)
 	rePostal4  = regexp.MustCompile(`^\d{4}$`) // AT and CH
 )
@@ -161,6 +164,17 @@ func validateRegister(f *Fields, text, country string, warn func(string, ...any)
 	r := f.Register
 	if r == nil {
 		return
+	}
+	// Split "hrb 104144" in the number field into type and number (only whitespace and case change).
+	if r.Number != nil {
+		if m := reRegPrefixed.FindStringSubmatch(strings.TrimSpace(*r.Number)); m != nil {
+			num := strings.TrimSpace(m[2])
+			r.Number = &num
+			if r.Type == nil {
+				t := m[1]
+				r.Type = &t
+			}
+		}
 	}
 	var typ struct{ canonical, country string }
 	known := false
