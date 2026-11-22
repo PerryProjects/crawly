@@ -193,7 +193,7 @@ func TestGroundingCheck(t *testing.T) {
 	}
 	f.Contact.Phone = s("0800 000000")
 	ws := Validate(f, text)
-	for _, want := range []string{"company_name not found verbatim", "contact.email not found verbatim", "vat_id not found verbatim", "register.number not found verbatim", "contact.phone not found verbatim", "postal_code not found"} {
+	for _, want := range []string{"company_name not found verbatim", "contact.email not found verbatim", "vat_id not found verbatim", "register.number not found verbatim", "contact.phone not found", "postal_code not found"} {
 		if !hasWarning(ws, want) {
 			t.Errorf("missing warning %q in %v", want, ws)
 		}
@@ -351,5 +351,28 @@ func TestLiveSpellingsRound2(t *testing.T) {
 	f = &Fields{CompanyName: s("x"), Address: &Address{Country: s("AT")}}
 	if ws := Validate(f, "x"); !hasWarning(ws, "postal address not found") {
 		t.Fatalf("country-only address: %+v", ws)
+	}
+}
+
+func TestCloudflareProtectedEmail(t *testing.T) {
+	text := "BLACKROLL AG Email: [\\[email protected\\]](https://blackroll.com/cdn-cgi/l/email-protection#780b101708561c1d381a14191b130a171414561b1715)"
+	f := &Fields{CompanyName: s("BLACKROLL AG"), Address: &Address{City: s("x")}, Contact: &Contact{Email: s("[email protected]")}}
+	Validate(f, text)
+	if f.Contact == nil || f.Contact.Email == nil || *f.Contact.Email != "shop.de@blackroll.com" {
+		t.Fatalf("contact = %+v", f.Contact)
+	}
+}
+
+func TestPhoneGroundingIgnoresPrefixSpelling(t *testing.T) {
+	text := "Porsche AG Tel: (+49) 0711 911-0 Fax +41 (0)71 588 02 44"
+	for _, v := range []string{"+49 711 911-0", "(+49) 0711 911-0", "0711 9110", "+41 71 588 02 44"} {
+		if !phoneGrounded(text, v) {
+			t.Errorf("%q should be grounded in %q", v, text)
+		}
+	}
+	for _, v := range []string{"+49 711 911-1", "0800 123456"} {
+		if phoneGrounded(text, v) {
+			t.Errorf("%q must not be grounded", v)
+		}
 	}
 }

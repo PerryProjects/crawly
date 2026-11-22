@@ -1,11 +1,13 @@
 package imprint
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net/mail"
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Deterministic validation. Every rule only produces a warning, never an error,
@@ -30,6 +32,7 @@ var (
 	// Also "HRB-Nr. 730623" (seen live on porsche.com).
 	reRegPrefixed = regexp.MustCompile(`(?i)^(H\s?R\s?A|H\s?R\s?B|G\s?n\s?R|P\s?R|V\s?R|F\s?N)[-.:\s]*(?:Nr\.?)?[.:\s]*(\d.*)$`)
 	reMailto      = regexp.MustCompile(`(?i)mailto:([^)\s?"'>]+)`)
+	reCFEmail     = regexp.MustCompile(`/cdn-cgi/l/email-protection#([0-9a-fA-F]{6,})`)
 	// Separators between several VAT IDs in one field ("DE 326114858, CHE-276.969.644", seen live).
 	reVATSplit = regexp.MustCompile(`(?i)\s*(?:[,;/|]|\bund\b|\band\b)\s*`)
 
@@ -122,8 +125,8 @@ func Validate(f *Fields, text string) []Warning {
 				f.Contact.Email = nil
 			}
 		}
-		dropUngrounded(text, "contact.phone", &f.Contact.Phone, warn)
-		dropUngrounded(text, "contact.fax", &f.Contact.Fax, warn)
+		dropUngroundedPhone(text, "contact.phone", &f.Contact.Phone, warn)
+		dropUngroundedPhone(text, "contact.fax", &f.Contact.Fax, warn)
 		f.Contact = nonEmpty(f.Contact)
 	}
 	// Cloudflare hides addresses as "[email protected]" (seen live on blackroll.com) while the page still
@@ -354,8 +357,17 @@ var legalForms = func() map[string]string {
 // onlyMailto returns the address when the text links exactly one distinct, valid mailto address.
 func onlyMailto(text string) (string, bool) {
 	var found string
+	var candidates []string
 	for _, m := range reMailto.FindAllStringSubmatch(text, -1) {
-		a := strings.ToLower(m[1])
+		candidates = append(candidates, m[1])
+	}
+	for _, m := range reCFEmail.FindAllStringSubmatch(text, -1) {
+		if a, ok := decodeCFEmail(m[1]); ok {
+			candidates = append(candidates, a)
+		}
+	}
+	for _, c := range candidates {
+		a := strings.ToLower(c)
 		if !validEmail(a) {
 			continue
 		}
@@ -365,6 +377,64 @@ func onlyMailto(text string) (string, bool) {
 		found = a
 	}
 	return found, found != ""
+}
+
+// decodeCFEmail decodes Cloudflare's e-mail protection ("/cdn-cgi/l/email-protection#<hex>"): the
+// first byte is an XOR key for the rest. Seen live on blackroll.com, where the page text only shows
+// "[email protected]".
+func decodeCFEmail(h string) (string, bool) {
+	b, err := hex.DecodeString(h)
+	if err != nil || len(b) < 2 {
+		return "", false
+	}
+	out := make([]byte, len(b)-1)
+	for i, c := range b[1:] {
+		out[i] = c ^ b[0]
+	}
+	return string(out), utf8.Valid(out)
+}
+
+// phoneKey reduces a phone number to comparable digits: no international prefix, no country code
+// of DE/AT/CH, no trunk 0. "+49 (0)711 911-0", "(+49) 0711 911-0" and "0711 9110" all become "7119110".
+func phoneKey(s string) string {
+	d := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, s)
+	d = strings.TrimPrefix(d, "00")
+	for _, cc := range []string{"49", "43", "41"} {
+		if rest, ok := strings.CutPrefix(d, cc); ok && strings.ContainsAny(s, "+") || ok && strings.HasPrefix(s, "00") {
+			d = rest
+			break
+		}
+	}
+	return strings.TrimPrefix(d, "0")
+}
+
+var rePhoneLike = regexp.MustCompile(`[+(]?\d[\d\s()/.\-]{4,}\d`)
+
+// phoneGrounded reports whether a phone number with the same digits occurs in text, independent of
+// how the country code and trunk prefix are written.
+func phoneGrounded(text, value string) bool {
+	k := phoneKey(value)
+	if text == "" || k == "" {
+		return true
+	}
+	for _, m := range rePhoneLike.FindAllString(text, -1) {
+		if phoneKey(m) == k {
+			return true
+		}
+	}
+	return grounded(text, value)
+}
+
+func dropUngroundedPhone(text, name string, v **string, warn func(string, string, string, ...any)) {
+	if *v != nil && !phoneGrounded(text, **v) {
+		warn(WarnUnverifiedRemoved, name, "%s not found in the imprint text, value removed", name)
+		*v = nil
+	}
 }
 
 // validEmail accepts exactly one plain address (no display name) with a dotted domain.
