@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/alicebob/miniredis/v2 v2.40.0
+	github.com/firecrawl/firecrawl/apps/go-sdk v1.16.9
 	github.com/go-redsync/redsync/v4 v4.18.1
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/prometheus/client_golang v1.25.0
