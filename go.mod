@@ -7,6 +7,7 @@ require (
 	github.com/firecrawl/firecrawl/apps/go-sdk v1.16.9
 	github.com/go-redsync/redsync/v4 v4.18.1
 	github.com/go-viper/mapstructure/v2 v2.4.0
+	github.com/labstack/echo/v5 v5.4.7
 	github.com/prometheus/client_golang v1.25.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/spf13/viper v1.21.0
