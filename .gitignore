@@ -1,0 +1,5 @@
+/bin/
+/siteinfo
+coverage.out
+*.test
+.env
