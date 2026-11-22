@@ -26,7 +26,7 @@ func debugServer(t *testing.T, opts ...Option) (srv *Server, lookupCalls *int) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
 	t.Cleanup(func() { _ = rdb.Close() })
-	store := cache.NewStore(rdb, cache.WithLoadTimeout(2*time.Second), cache.WithLockMargin(time.Second),
+	store := cache.NewStore(rdb, cache.WithLoadTimeout(2*time.Second), cache.WithLockTTL(time.Second),
 		cache.WithClassifier(func(err error) cache.Verdict {
 			if errors.Is(err, crawler.ErrUpstream) {
 				return cache.Verdict{Status: cache.StatusError, Code: crawler.CodeUpstream}

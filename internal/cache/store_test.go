@@ -66,7 +66,7 @@ func (e *env) store(opts ...Option) *Store {
 	base := []Option{
 		WithObserver(e.rec),
 		WithLoadTimeout(5 * time.Second),
-		WithLockMargin(time.Second),
+		WithLockTTL(time.Second),
 		WithLockRetryDelay(2*time.Millisecond, 5*time.Millisecond),
 		WithClassifier(func(err error) Verdict {
 			if errors.Is(err, errUpstream) {
@@ -302,7 +302,7 @@ func TestDoubleCheckAfterLock(t *testing.T) {
 
 func TestLockFailureIsTypedError(t *testing.T) {
 	e := newEnv(t)
-	s := e.store(WithLoadTimeout(150*time.Millisecond), WithLockMargin(time.Second))
+	s := e.store(WithLoadTimeout(150*time.Millisecond), WithLockTTL(time.Second))
 	other := redsync.New(redsyncgoredis.NewPool(e.rdb)).NewMutex(testKey.Lock(), redsync.WithExpiry(30*time.Second))
 	if err := other.Lock(); err != nil {
 		t.Fatal(err)
@@ -705,5 +705,42 @@ func TestPartialResultsGetTheShortTTL(t *testing.T) {
 	}
 	if info, _ := s.Inspect(ctx, degraded); !info.Partial {
 		t.Error("Inspect must report the partial flag")
+	}
+}
+
+func TestLockIsExtendedWhileLoading(t *testing.T) {
+	e := newEnv(t)
+	s := e.store(WithLockTTL(300 * time.Millisecond))
+	other := redsync.New(redsyncgoredis.NewPool(e.rdb)).NewMutex(testKey.Lock(), redsync.WithExpiry(time.Second), redsync.WithTries(1))
+	release := make(chan struct{})
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Load(context.Background(), testKey, func(ctx context.Context) (Fetched, error) {
+			close(started)
+			<-release
+			return Fetched{Data: json.RawMessage(`{"v":1}`)}, nil
+		}, LoadOptions{})
+		done <- err
+	}()
+	<-started
+	// miniredis only expires keys when told to: advance its clock in step with real time for more
+	// than three lock TTLs. Without the watchdog the lock would be gone after 300 ms.
+	for range 20 {
+		time.Sleep(50 * time.Millisecond)
+		e.mr.FastForward(50 * time.Millisecond)
+	}
+	if !e.mr.Exists(testKey.Lock()) {
+		t.Fatal("the lock expired during a running load; the watchdog did not extend it")
+	}
+	if err := other.Lock(); err == nil {
+		t.Fatal("the lock expired during a running load; the watchdog did not extend it")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if e.mr.Exists(testKey.Lock()) {
+		t.Fatal("lock must be released after the load")
 	}
 }

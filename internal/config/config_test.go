@@ -96,7 +96,7 @@ func TestValidate(t *testing.T) {
 		{"firecrawl >= load", func(c *Config) { c.Firecrawl.Timeout = 61 * time.Second }, "firecrawl.timeout"},
 		{"branding >= load", func(c *Config) { c.Firecrawl.BrandingTimeout = 60 * time.Second }, "branding_timeout"},
 		{"load >= handler", func(c *Config) { c.Cache.LoadTimeout = 66 * time.Second }, "cache.load_timeout"},
-		{"handler >= lock expiry", func(c *Config) { c.Cache.LockMargin = time.Second }, "lock expiry"},
+		{"zero lock ttl", func(c *Config) { c.Cache.LockTTL = 0 }, "cache.lock_ttl"},
 		{"write <= handler", func(c *Config) { c.Server.WriteTimeout = 45 * time.Second }, "write_timeout"},
 		{"zero ttl", func(c *Config) { c.Cache.TTL.Error = 0 }, "cache.ttl.error"},
 		{"no api key for cloud", func(c *Config) { c.Firecrawl.APIKey = "" }, "firecrawl.api_key"},

@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -141,6 +142,7 @@ func WithFresh(ctx context.Context) context.Context { return context.WithValue(c
 // Scrape implements Crawler.
 func (c *Client) Scrape(ctx context.Context, url string, req ScrapeRequest) (*Page, error) {
 	opts := c.options(req)
+	opts.Location = c.location(url)
 	if fresh, _ := ctx.Value(freshKey{}).(bool); fresh {
 		opts.MaxAge = firecrawl.Int64(0)
 	}
@@ -163,9 +165,7 @@ func (c *Client) Scrape(ctx context.Context, url string, req ScrapeRequest) (*Pa
 // titles. It costs a flat 1 credit however many URLs come back (Firecrawl billing docs).
 func (c *Client) Map(ctx context.Context, siteURL, search string, limit int) ([]MapLink, error) {
 	opts := &firecrawl.MapOptions{Search: firecrawl.String(search), Limit: firecrawl.Int(max(limit, 1))}
-	if c.country != "" {
-		opts.Location = &firecrawl.LocationConfig{Country: c.country, Languages: c.languages}
-	}
+	opts.Location = c.location(siteURL)
 	var data *firecrawl.MapData
 	err := c.withRetry(ctx, siteURL, c.timeout, "map:"+search, func(callCtx context.Context) error {
 		var err error
@@ -257,6 +257,26 @@ func (c *Client) backoff(attempt int) time.Duration {
 	return d/2 + rand.N(d/2+1) // equal jitter: [d/2, d]
 }
 
+// countryByTLD fetches Austrian and Swiss sites as a visitor from their own country; sites that
+// localize or geo-redirect by visitor (seen live: bambulab.com) then serve their own variant.
+var countryByTLD = map[string]string{"de": "DE", "at": "AT", "ch": "CH"}
+
+// location returns the Firecrawl location for a target URL: the country of its DACH TLD, else
+// the configured default. Nil when location is disabled.
+func (c *Client) location(target string) *firecrawl.LocationConfig {
+	if c.country == "" {
+		return nil
+	}
+	country := c.country
+	if u, err := neturl.Parse(target); err == nil {
+		host := u.Hostname()
+		if cc, ok := countryByTLD[host[strings.LastIndexByte(host, '.')+1:]]; ok {
+			country = cc
+		}
+	}
+	return &firecrawl.LocationConfig{Country: country, Languages: c.languages}
+}
+
 func (c *Client) options(req ScrapeRequest) *firecrawl.ScrapeOptions {
 	var formats []string
 	if req.Markdown {
@@ -280,9 +300,6 @@ func (c *Client) options(req ScrapeRequest) *firecrawl.ScrapeOptions {
 	}
 	if c.noStore {
 		opts.StoreInCache = firecrawl.Bool(false)
-	}
-	if c.country != "" {
-		opts.Location = &firecrawl.LocationConfig{Country: c.country, Languages: c.languages}
 	}
 	// Let Firecrawl give up slightly before our own per-call timeout fires.
 	opts.Timeout = firecrawl.Int(max(int(c.callTimeout(req).Milliseconds())*9/10, 1000))

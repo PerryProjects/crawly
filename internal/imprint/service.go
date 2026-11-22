@@ -18,10 +18,7 @@ import (
 	"github.com/perryprojects/siteinfo/internal/observability"
 )
 
-// fallbackPaths are probed (at most these three) when the homepage links no imprint.
-var fallbackPaths = []string{"/impressum", "/imprint", "/legal-notice"}
-
-// maxLinkedAttempts bounds the ranked, linked candidates tried before the fallback paths.
+// maxLinkedAttempts bounds the ranked, linked candidates tried before the site map.
 const maxLinkedAttempts = 2
 
 // imprintMarkers must appear in a genuine imprint page. They reject soft-404

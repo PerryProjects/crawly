@@ -85,7 +85,7 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 
 	store := cache.NewStore(rdb,
 		cache.WithLoadTimeout(cfg.Cache.LoadTimeout),
-		cache.WithLockMargin(cfg.Cache.LockMargin),
+		cache.WithLockTTL(cfg.Cache.LockTTL),
 		cache.WithTTLs(cache.TTLs{
 			ImprintOK: cfg.Cache.TTL.ImprintOK, BrandOK: cfg.Cache.TTL.BrandOK,
 			NotFound: cfg.Cache.TTL.NotFound, Error: cfg.Cache.TTL.Error, Partial: cfg.Cache.TTL.Partial,

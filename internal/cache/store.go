@@ -122,7 +122,7 @@ type Store struct {
 	inflight sync.WaitGroup
 
 	loadTimeout   time.Duration
-	lockMargin    time.Duration
+	lockTTL       time.Duration
 	lockDelayMin  time.Duration
 	lockDelayMax  time.Duration
 	refreshCool   time.Duration
@@ -144,8 +144,9 @@ type Option func(*Store)
 // WithLoadTimeout bounds one load (lock wait plus upstream work). Default 40s.
 func WithLoadTimeout(d time.Duration) Option { return func(s *Store) { s.loadTimeout = d } }
 
-// WithLockMargin is added to the load timeout to get the lock expiry. Default 10s.
-func WithLockMargin(d time.Duration) Option { return func(s *Store) { s.lockMargin = d } }
+// WithLockTTL sets the lock expiry. The lock is extended every TTL/3 while a load runs, so
+// the TTL only bounds how long a crashed pod can block a host. Default 15s.
+func WithLockTTL(d time.Duration) Option { return func(s *Store) { s.lockTTL = d } }
 
 // WithLockRetryDelay sets the jittered pause between lock attempts. Default 50-100ms.
 func WithLockRetryDelay(minDelay, maxDelay time.Duration) Option {
@@ -190,7 +191,7 @@ func NewStore(rdb redis.UniversalClient, opts ...Option) *Store {
 		rdb:           rdb,
 		rs:            redsync.New(redsyncgoredis.NewPool(rdb)),
 		loadTimeout:   40 * time.Second,
-		lockMargin:    10 * time.Second,
+		lockTTL:       15 * time.Second,
 		lockDelayMin:  50 * time.Millisecond,
 		lockDelayMax:  100 * time.Millisecond,
 		refreshCool:   time.Hour,
@@ -374,7 +375,7 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 	}()
 
 	mu := s.rs.NewMutex(key.Lock(),
-		redsync.WithExpiry(s.loadTimeout+s.lockMargin),
+		redsync.WithExpiry(s.lockTTL),
 		redsync.WithTries(int(s.loadTimeout/s.lockDelayMin)+1), // bounded by ctx in practice
 		redsync.WithRetryDelayFunc(s.lockDelay),
 	)
@@ -398,6 +399,10 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 			s.log.Warnw("releasing load lock failed", observability.Fields(ctx), "key", key.Cache(), "released", ok, "error", err)
 		}
 	}()
+	// The lock lives only lockTTL and is extended while the load runs. A pod that dies mid-load
+	// therefore blocks the host for at most lockTTL, not for the whole load timeout.
+	stopWatchdog := s.keepLock(ctx, mu, key)
+	defer stopWatchdog() // runs before the unlock above (defers are LIFO)
 
 	// Another pod may have filled the cache while we waited for the lock.
 	if !forceFresh {
@@ -472,6 +477,36 @@ func (s *Store) store(ctx context.Context, key Key, env Envelope) {
 	if err != nil {
 		s.obs.CacheWriteFailed()
 		s.log.Errorw("writing cache entry failed", observability.Fields(ctx), "key", key.Cache(), "error", err)
+	}
+}
+
+// keepLock extends mu every lockTTL/3 until the returned stop function is called.
+func (s *Store) keepLock(ctx context.Context, mu *redsync.Mutex, key Key) (stop func()) {
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		t := time.NewTicker(s.lockTTL / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.lockTTL/3)
+				ok, err := mu.ExtendContext(ectx)
+				cancel()
+				if err != nil || !ok {
+					// Another pod may now load the same host: one duplicate upstream load, no harm.
+					s.log.Warnw("extending load lock failed", observability.Fields(ctx), "key", key.Lock(), "error", err)
+					observability.TraceFrom(ctx).Add("cache", "lock could not be extended", "error", err)
+					return
+				}
+			}
+		}
+	})
+	return func() {
+		close(done)
+		wg.Wait()
 	}
 }
 

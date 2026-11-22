@@ -52,7 +52,7 @@ type LogConfig struct {
 //
 // Timeout chain (each stage must be longer than the one below it):
 // firecrawl.timeout < cache.load_timeout < server.handler_timeout <
-// cache.load_timeout + cache.lock_margin (lock expiry).
+// (the load lock is short-lived and extended while a load runs, so it is not part of the chain).
 type ServerConfig struct {
 	Addr              string        `mapstructure:"addr"`
 	ReadHeaderTimeout time.Duration `mapstructure:"read_header_timeout"`
@@ -128,7 +128,7 @@ type FirecrawlConfig struct {
 // CacheConfig configures the read-through cache.
 type CacheConfig struct {
 	LoadTimeout    time.Duration `mapstructure:"load_timeout"`
-	LockMargin     time.Duration `mapstructure:"lock_margin"`
+	LockTTL        time.Duration `mapstructure:"lock_ttl"` // extended while a load runs; bounds a crashed pod's hold
 	CloseTimeout   time.Duration `mapstructure:"close_timeout"`
 	TTL            TTLConfig     `mapstructure:"ttl"`
 	RefreshEnabled bool          `mapstructure:"refresh_enabled"`
@@ -143,9 +143,6 @@ type TTLConfig struct {
 	Error     time.Duration `mapstructure:"error"`
 	Partial   time.Duration `mapstructure:"partial"` // degraded ok results, e.g. LLM extraction failed
 }
-
-// LockExpiry is the redsync mutex expiry: the load deadline plus a margin.
-func (c CacheConfig) LockExpiry() time.Duration { return c.LoadTimeout + c.LockMargin }
 
 // Default returns the configuration used when nothing else is set.
 func Default() Config {
@@ -192,7 +189,7 @@ func Default() Config {
 		},
 		Cache: CacheConfig{
 			LoadTimeout:  60 * time.Second,
-			LockMargin:   10 * time.Second,
+			LockTTL:      15 * time.Second,
 			CloseTimeout: 65 * time.Second,
 			TTL: TTLConfig{
 				ImprintOK: 30 * 24 * time.Hour,
@@ -335,7 +332,7 @@ func (c *Config) Validate() error {
 		"firecrawl.branding_timeout": c.Firecrawl.BrandingTimeout,
 		"firecrawl.backoff_base":     c.Firecrawl.BackoffBase,
 		"cache.load_timeout":         c.Cache.LoadTimeout,
-		"cache.lock_margin":          c.Cache.LockMargin,
+		"cache.lock_ttl":             c.Cache.LockTTL,
 		"cache.close_timeout":        c.Cache.CloseTimeout,
 		"cache.ttl.imprint_ok":       c.Cache.TTL.ImprintOK,
 		"cache.ttl.brand_ok":         c.Cache.TTL.BrandOK,
@@ -356,10 +353,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Cache.LoadTimeout >= c.Server.HandlerTimeout {
 		add("cache.load_timeout (%s) must be shorter than server.handler_timeout (%s)", c.Cache.LoadTimeout, c.Server.HandlerTimeout)
-	}
-	if c.Server.HandlerTimeout >= c.Cache.LockExpiry() {
-		add("server.handler_timeout (%s) must be shorter than the lock expiry cache.load_timeout+cache.lock_margin (%s)",
-			c.Server.HandlerTimeout, c.Cache.LockExpiry())
 	}
 	if c.Server.WriteTimeout <= c.Server.HandlerTimeout {
 		add("server.write_timeout (%s) must be longer than server.handler_timeout (%s)", c.Server.WriteTimeout, c.Server.HandlerTimeout)

@@ -39,7 +39,7 @@ func TestClusterReadThroughAndHashTags(t *testing.T) {
 		}
 	}
 
-	s := NewStore(rdb, WithLoadTimeout(10*time.Second), WithLockMargin(5*time.Second))
+	s := NewStore(rdb, WithLoadTimeout(10*time.Second), WithLockTTL(5*time.Second))
 	run := time.Now().UnixNano()
 	var wg sync.WaitGroup
 	var calls [3]atomic.Int32

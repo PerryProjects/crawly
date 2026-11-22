@@ -501,3 +501,33 @@ func TestMapRequestAndResult(t *testing.T) {
 		t.Fatalf("links = %+v", links)
 	}
 }
+
+func TestLocationFollowsTheSiteCountry(t *testing.T) {
+	tests := []struct {
+		name, url, country string
+		opts               []Option
+	}{
+		{"german site", "https://acme.de/", "DE", []Option{WithLocation("DE", []string{"de"})}},
+		{"austrian site", "https://acme.at/impressum", "AT", []Option{WithLocation("DE", []string{"de"})}},
+		{"swiss site", "https://www.acme.ch/", "CH", []Option{WithLocation("DE", []string{"de"})}},
+		{"other TLD uses the default", "https://acme.com/", "DE", []Option{WithLocation("DE", []string{"de"})}},
+		{"disabled", "https://acme.at/", "", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var body map[string]any
+			c := newSDKClient(t, func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(b, &body)
+				_, _ = io.WriteString(w, `{"success":true,"data":{"markdown":"x"}}`)
+			}, tt.opts...)
+			if _, err := c.Scrape(context.Background(), tt.url, ScrapeRequest{Markdown: true}); err != nil {
+				t.Fatal(err)
+			}
+			loc, _ := body["location"].(map[string]any)
+			if got, _ := loc["country"].(string); got != tt.country {
+				t.Fatalf("location country = %q, want %q", got, tt.country)
+			}
+		})
+	}
+}

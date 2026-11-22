@@ -456,7 +456,7 @@ func TestEndToEndWithRealCache(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
 	t.Cleanup(func() { _ = rdb.Close() })
 
-	store := cache.NewStore(rdb, cache.WithLoadTimeout(2*time.Second), cache.WithLockMargin(time.Second),
+	store := cache.NewStore(rdb, cache.WithLoadTimeout(2*time.Second), cache.WithLockTTL(time.Second),
 		cache.WithClassifier(func(err error) cache.Verdict {
 			switch {
 			case errors.Is(err, imprint.ErrNotFound):
