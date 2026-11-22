@@ -69,7 +69,7 @@ func Normalize(raw string) (Result, error) {
 	if u.Fragment != "" || strings.Contains(raw, "#") {
 		return Result{}, invalid("fragment not allowed")
 	}
-	if p := u.Port(); p != "" && !(scheme == "http" && p == "80") && !(scheme == "https" && p == "443") {
+	if p := u.Port(); p != "" && (scheme != "http" || p != "80") && (scheme != "https" || p != "443") {
 		return Result{}, invalid("non-default port %s", p)
 	}
 

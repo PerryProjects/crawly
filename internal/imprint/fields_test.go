@@ -62,9 +62,12 @@ func TestFieldsFromMapToleratesWrongTypes(t *testing.T) {
 }
 
 func TestNormalizeCountry(t *testing.T) {
-	for in, want := range map[string]string{"DE": "DE", " deutschland ": "DE", "Austria": "AT", "Österreich": "AT", "Schweiz": "CH", "suisse": "CH", "FR": "", "": ""} {
-		if got := normalizeCountry(in); got != want {
-			t.Errorf("normalizeCountry(%q) = %q, want %q", in, got, want)
+	for _, tt := range [][2]string{
+		{"DE", "DE"}, {"  deutschland\t", "DE"}, {"Austria", "AT"}, {"Österreich", "AT"},
+		{"Schweiz", "CH"}, {"suisse", "CH"}, {"FR", ""}, {"", ""},
+	} {
+		if got := normalizeCountry(tt[0]); got != tt[1] {
+			t.Errorf("normalizeCountry(%q) = %q, want %q", tt[0], got, tt[1])
 		}
 	}
 }

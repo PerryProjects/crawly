@@ -109,11 +109,12 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 	mux.Handle("GET /metrics", m.Handler())
 	a.metrics = &http.Server{Handler: mux, ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout}
 
-	if a.apiLn, err = net.Listen("tcp", cfg.Server.Addr); err != nil {
+	var lc net.ListenConfig
+	if a.apiLn, err = lc.Listen(context.Background(), "tcp", cfg.Server.Addr); err != nil {
 		_ = rdb.Close()
 		return nil, fmt.Errorf("app: listen on %s: %w", cfg.Server.Addr, err)
 	}
-	if a.metricsLn, err = net.Listen("tcp", cfg.Server.MetricsAddr); err != nil {
+	if a.metricsLn, err = lc.Listen(context.Background(), "tcp", cfg.Server.MetricsAddr); err != nil {
 		_ = a.apiLn.Close()
 		_ = rdb.Close()
 		return nil, fmt.Errorf("app: listen on %s: %w", cfg.Server.MetricsAddr, err)
@@ -196,13 +197,15 @@ func (a *App) Run(ctx context.Context) error {
 		a.log.Error("server failed, shutting down", zap.Error(runErr))
 	}
 
-	shutdownErr := a.shutdown()
+	shutdownErr := a.shutdown(ctx)
 	wg.Wait()
 	return errors.Join(runErr, shutdownErr)
 }
 
-func (a *App) shutdown() error {
+func (a *App) shutdown(parent context.Context) error {
 	var errs []error
+	// parent is already cancelled (that is why we are here); keep its values, drop its cancellation.
+	base := context.WithoutCancel(parent)
 
 	a.srv.MarkNotReady()
 	if d := a.cfg.Server.ShutdownDelay; d > 0 {
@@ -210,20 +213,20 @@ func (a *App) shutdown() error {
 		time.Sleep(d) // deliberately not interruptible: the point is to keep serving while not ready
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), a.cfg.Server.ShutdownTimeout)
+	ctx, cancel := context.WithTimeout(base, a.cfg.Server.ShutdownTimeout)
 	if err := a.api.Shutdown(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("app: api shutdown: %w", err))
 		_ = a.api.Close()
 	}
 	cancel()
 
-	ctx, cancel = context.WithTimeout(context.Background(), a.cfg.Cache.CloseTimeout)
+	ctx, cancel = context.WithTimeout(base, a.cfg.Cache.CloseTimeout)
 	if err := a.store.Close(ctx); err != nil {
 		errs = append(errs, err)
 	}
 	cancel()
 
-	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel = context.WithTimeout(base, 5*time.Second)
 	if err := a.metrics.Shutdown(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("app: metrics shutdown: %w", err))
 	}

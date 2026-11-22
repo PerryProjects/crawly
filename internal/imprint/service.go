@@ -66,10 +66,7 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Imprint, error) {
 	hosts := []string{host, base.Hostname()}
 
 	ranked := RankLinks(hosts, base, MergeLinks(home.Links, home.Markdown))
-	var attempts []Candidate
-	for _, c := range ranked[:min(len(ranked), maxLinkedAttempts)] {
-		attempts = append(attempts, c)
-	}
+	attempts := ranked[:min(len(ranked), maxLinkedAttempts)]
 
 	tried := map[string]bool{}
 	try := func(c Candidate) (*Imprint, error) {

@@ -230,7 +230,7 @@ func TestToPage(t *testing.T) {
 		Metadata: map[string]any{"statusCode": float64(404), "url": "https://example.de/final"},
 	}
 	p := toPage("https://example.de/", doc)
-	if p.URL != "https://example.de/final" || p.StatusCode != 404 || p.JSON["company_name"] != "ACME" || len(p.Links) != 1 {
+	if p.URL != "https://example.de/final" || p.StatusCode != http.StatusNotFound || p.JSON["company_name"] != "ACME" || len(p.Links) != 1 {
 		t.Fatalf("%+v", p)
 	}
 	if p := toPage("https://x.de/", &firecrawl.Document{JSON: "not an object"}); p.JSON != nil || p.URL != "https://x.de/" {
@@ -290,7 +290,7 @@ func TestSDKRequestShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Markdown != "# Impressum" || page.StatusCode != 200 || page.JSON["company_name"] != "ACME GmbH" {
+	if page.Markdown != "# Impressum" || page.StatusCode != http.StatusOK || page.JSON["company_name"] != "ACME GmbH" {
 		t.Fatalf("page = %+v", page)
 	}
 	if auth != "Bearer fc-test-key" {
@@ -356,7 +356,7 @@ func TestSDK5xxBecomesErrUpstream(t *testing.T) {
 	}, WithSleep((&sleeps{}).sleep))
 	_, err := c.Scrape(context.Background(), "https://example.de/", ScrapeRequest{})
 	var fe *firecrawl.FirecrawlError
-	if !errors.Is(err, ErrUpstream) || !errors.As(err, &fe) || fe.StatusCode != 502 {
+	if !errors.Is(err, ErrUpstream) || !errors.As(err, &fe) || fe.StatusCode != http.StatusBadGateway {
 		t.Fatalf("err = %v", err)
 	}
 }

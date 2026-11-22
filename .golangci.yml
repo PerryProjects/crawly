@@ -1,0 +1,69 @@
+# golangci-lint v2 configuration (v1.x cannot read Go 1.27 export data; use v2.15+).
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck      # includes the former gosimple and stylecheck
+    - unused
+    - ineffassign
+    - errorlint        # errors.Is/As instead of == and type assertions, %w wrapping
+    - bodyclose
+    - noctx            # HTTP requests must carry a context
+    - contextcheck     # context propagation
+    - gosec
+    - gocritic
+    - revive
+    - misspell
+    - unconvert
+    - unparam
+    - nilerr
+    - copyloopvar
+    - intrange         # prefer `for i := range n`
+    - perfsprint
+    - prealloc
+    - usestdlibvars
+    - exhaustive
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment   # struct layout is chosen for readability
+        - shadow
+    gocritic:
+      enabled-tags: [diagnostic, style, performance]
+      disabled-checks:
+        - hugeParam
+        - ifElseChain
+    revive:
+      rules:
+        - name: exported
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: package-comments
+        - name: unreachable-code
+        - name: context-as-argument
+        - name: context-keys-type
+    exhaustive:
+      default-signifies-exhaustive: true
+    gosec:
+      excludes:
+        - G404   # math/rand/v2 is used for retry jitter and lock delay only, never for secrets
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [gosec, errcheck, unparam, prealloc, noctx, bodyclose, perfsprint, contextcheck]
+
+formatters:
+  enable:
+    - gofmt

@@ -271,17 +271,17 @@ func (c *Config) Validate() error {
 	if c.Server.ShutdownDelay < 0 || c.Server.RetryAfter < 0 {
 		add("server.shutdown_delay and server.retry_after must not be negative")
 	}
-	if !(c.Firecrawl.Timeout < c.Cache.LoadTimeout) {
+	if c.Firecrawl.Timeout >= c.Cache.LoadTimeout {
 		add("firecrawl.timeout (%s) must be shorter than cache.load_timeout (%s)", c.Firecrawl.Timeout, c.Cache.LoadTimeout)
 	}
-	if !(c.Cache.LoadTimeout < c.Server.HandlerTimeout) {
+	if c.Cache.LoadTimeout >= c.Server.HandlerTimeout {
 		add("cache.load_timeout (%s) must be shorter than server.handler_timeout (%s)", c.Cache.LoadTimeout, c.Server.HandlerTimeout)
 	}
-	if !(c.Server.HandlerTimeout < c.Cache.LockExpiry()) {
+	if c.Server.HandlerTimeout >= c.Cache.LockExpiry() {
 		add("server.handler_timeout (%s) must be shorter than the lock expiry cache.load_timeout+cache.lock_margin (%s)",
 			c.Server.HandlerTimeout, c.Cache.LockExpiry())
 	}
-	if !(c.Server.WriteTimeout > c.Server.HandlerTimeout) {
+	if c.Server.WriteTimeout <= c.Server.HandlerTimeout {
 		add("server.write_timeout (%s) must be longer than server.handler_timeout (%s)", c.Server.WriteTimeout, c.Server.HandlerTimeout)
 	}
 	return errors.Join(errs...)

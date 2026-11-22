@@ -32,7 +32,7 @@ func newVersionCmd() *cobra.Command {
 					}
 				}
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "siteinfo %s (commit %s%s, %s)\n", version, revision, modified, goVersion)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "siteinfo %s (commit %s%s, %s)\n", version, revision, modified, goVersion)
 		},
 	}
 }

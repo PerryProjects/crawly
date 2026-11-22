@@ -87,9 +87,9 @@ func testConfig(t *testing.T, redisAddr, firecrawlURL string) *config.Config {
 	return &cfg
 }
 
-func get(t *testing.T, url, token string) (int, http.Header, map[string]any) {
+func get(t *testing.T, url, token string) (code int, hdr http.Header, body map[string]any) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -99,9 +99,8 @@ func get(t *testing.T, url, token string) (int, http.Header, map[string]any) {
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	var m map[string]any
-	_ = json.Unmarshal(b, &m)
-	return resp.StatusCode, resp.Header, m
+	_ = json.Unmarshal(b, &body)
+	return resp.StatusCode, resp.Header, body
 }
 
 // Full stack: real wiring, real Firecrawl SDK against a fake, miniredis, real listeners.

@@ -110,7 +110,7 @@ func newTestServer(t *testing.T, loader cache.Loader, l fakeLookups, opts ...Opt
 
 func do(t *testing.T, s *Server, method, target string, hdr map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(method, target, nil)
+	req := httptest.NewRequest(method, target, http.NoBody)
 	if _, ok := hdr["Authorization"]; !ok {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
