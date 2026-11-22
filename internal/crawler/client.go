@@ -14,6 +14,8 @@ import (
 	"github.com/firecrawl/firecrawl/apps/go-sdk"
 	"github.com/firecrawl/firecrawl/apps/go-sdk/option"
 	"go.uber.org/zap"
+
+	"github.com/OWNER/siteinfo/internal/observability"
 )
 
 // Scraper is the part of *firecrawl.Client this package needs.
@@ -129,7 +131,7 @@ func (c *Client) Scrape(ctx context.Context, url string, req ScrapeRequest) (*Pa
 		if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= delay {
 			return nil, err // not enough budget left to wait and retry
 		}
-		c.log.Debug("retrying firecrawl call", zap.Int("attempt", attempt+1), zap.Duration("delay", delay), zap.String("code", ErrorCode(err)))
+		c.log.Debug("retrying firecrawl call", observability.Fields(ctx), zap.Int("attempt", attempt+1), zap.Duration("delay", delay), zap.String("code", ErrorCode(err)))
 		if serr := c.sleep(ctx, delay); serr != nil {
 			return nil, serr
 		}

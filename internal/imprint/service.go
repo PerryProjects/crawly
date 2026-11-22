@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -37,7 +38,7 @@ type Service struct {
 // Option configures optional Service settings.
 type Option func(*Service)
 
-// WithLogger sets the fallback logger.
+// WithLogger sets the logger.
 func WithLogger(l *zap.Logger) Option { return func(s *Service) { s.log = l } }
 
 // NewService wires discovery (scraper) and extraction (extractor).
@@ -52,12 +53,15 @@ func NewService(scraper Scraper, extractor Extractor, opts ...Option) *Service {
 // Lookup finds the imprint of host (normalized, no scheme). It returns
 // ErrNotFound when no page qualifies; crawler errors are passed through.
 func (s *Service) Lookup(ctx context.Context, host string) (*Imprint, error) {
-	log := observability.LoggerFrom(ctx, s.log).With(zap.String("host", host))
 	homepage := "https://" + host + "/"
 
 	home, err := s.scraper.Scrape(ctx, homepage, crawler.ScrapeRequest{Markdown: true, Links: true, FullPage: true})
 	if err != nil {
 		return nil, fmt.Errorf("imprint: scrape homepage: %w", err)
+	}
+	if home.StatusCode >= http.StatusBadRequest {
+		// Firecrawl answers HTTP 200 with metadata.statusCode of the target (verified live for a 404).
+		return nil, fmt.Errorf("%w: homepage returned HTTP %d", crawler.ErrUpstream, home.StatusCode)
 	}
 	base, err := url.Parse(home.URL)
 	if err != nil || base.Hostname() == "" {
@@ -76,11 +80,11 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Imprint, error) {
 			if hardFailure(err) {
 				return nil, err
 			}
-			log.Debug("imprint candidate failed", zap.String("url", c.URL), zap.Error(err))
+			s.log.Debug("imprint candidate failed", observability.Fields(ctx), zap.String("url", c.URL), zap.Error(err))
 			return nil, nil
 		}
 		if !usable(x) {
-			log.Debug("imprint candidate rejected", zap.String("url", c.URL), zap.Int("status", x.StatusCode))
+			s.log.Debug("imprint candidate rejected", observability.Fields(ctx), zap.String("url", c.URL), zap.Int("status", x.StatusCode))
 			return nil, nil
 		}
 		return build(x, c, hosts), nil

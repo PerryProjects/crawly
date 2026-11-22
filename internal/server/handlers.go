@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v5"
-	"go.uber.org/zap"
 
 	"github.com/OWNER/siteinfo/internal/brand"
 	"github.com/OWNER/siteinfo/internal/cache"
@@ -64,7 +63,9 @@ func serve[T any](s *Server, c *echo.Context, kind cache.Kind, notFound error,
 		return err
 	}
 	host := norm.Host
-	c.Set(ctxHost, host)
+	if rf := observability.RequestFieldsFrom(c.Request().Context()); rf != nil {
+		rf.Host, rf.Kind = host, string(kind) // read-only from here on; detached loads read them
+	}
 
 	refresh := false
 	if v := c.QueryParam("refresh"); v != "" && s.refreshEnabled {
@@ -77,7 +78,6 @@ func serve[T any](s *Server, c *echo.Context, kind cache.Kind, notFound error,
 	// and flows into the crawler. The detached load runs on its own timeout.
 	ctx, cancel := context.WithTimeout(c.Request().Context(), s.handlerTimeout)
 	defer cancel()
-	ctx = observability.WithLogger(ctx, observability.LoggerFrom(ctx, s.log).With(zap.String("host", host), zap.String("kind", string(kind))))
 
 	res, err := cache.GetOrLoad(ctx, s.loader, cache.Key{Kind: kind, Host: host}, cache.LoadOptions{Refresh: refresh}, func(ctx context.Context) (T, error) {
 		return lookup(ctx, host)

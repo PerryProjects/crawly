@@ -7,4 +7,3 @@ spec:
   selector: {app.kubernetes.io/name: siteinfo}
   ports:
     - {name: http, port: 80, targetPort: http}
-    # /metrics is deliberately not exposed through this Service; scrape the pods directly.

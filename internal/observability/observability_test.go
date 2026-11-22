@@ -1,69 +1,240 @@
 package observability
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest/observer"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func TestNewLogger(t *testing.T) {
-	for _, env := range []string{"dev", "production"} {
-		l, err := NewLogger(env, "debug")
-		if err != nil || !l.Core().Enabled(zap.DebugLevel) {
-			t.Fatalf("%s: %v", env, err)
-		}
-	}
 	if _, err := NewLogger("dev", "loud"); err == nil {
 		t.Fatal("invalid level must fail")
 	}
+	var prod, dev bytes.Buffer
+	pl, err := NewLoggerTo("production", "info", &prod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dl, err := NewLoggerTo("dev", "debug", &dev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl.Debug("hidden")
+	pl.Info("shown")
+	dl.Debug("dev debug")
+	if strings.Contains(prod.String(), "hidden") || !strings.Contains(prod.String(), `"msg":"shown"`) {
+		t.Errorf("production log = %q", prod.String())
+	}
+	if strings.Contains(prod.String(), `"caller"`) {
+		t.Error("production logs must not capture the caller (it allocates per call)")
+	}
+	if !strings.Contains(dev.String(), "dev debug") || !strings.Contains(dev.String(), "observability_test.go") {
+		t.Errorf("dev log = %q", dev.String())
+	}
 }
 
-func TestLoggerContext(t *testing.T) {
-	core, logs := observer.New(zap.InfoLevel)
-	fallback := zap.NewNop()
-	if LoggerFrom(context.Background(), fallback) != fallback {
-		t.Fatal("fallback expected")
+func TestRequestFields(t *testing.T) {
+	var buf bytes.Buffer
+	l, _ := NewLoggerTo("production", "info", &buf)
+
+	l.Info("no fields", Fields(context.Background()))
+	ctx := WithRequestFields(context.Background(), &RequestFields{RequestID: "r1"})
+	rf := RequestFieldsFrom(ctx)
+	rf.Host, rf.Kind = "acme.de", "imprint"
+	// The values must survive context.WithoutCancel (detached cache loads).
+	l.Info("with fields", Fields(context.WithoutCancel(ctx)))
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 || strings.Contains(lines[0], "request_id") {
+		t.Fatalf("lines = %q", lines)
 	}
-	ctx := WithLogger(context.Background(), zap.New(core).With(zap.String("request_id", "r1")))
-	// The logger must survive context.WithoutCancel (detached cache loads).
-	LoggerFrom(context.WithoutCancel(ctx), fallback).Info("hello")
-	if logs.Len() != 1 || logs.All()[0].ContextMap()["request_id"] != "r1" {
-		t.Fatalf("logs = %v", logs.All())
+	for _, want := range []string{`"request_id":"r1"`, `"host":"acme.de"`, `"kind":"imprint"`} {
+		if !strings.Contains(lines[1], want) {
+			t.Errorf("%s missing in %s", want, lines[1])
+		}
+	}
+	// Flat, not nested: Inline, not Object.
+	if strings.Contains(lines[1], `"request":{`) {
+		t.Error("fields must be inlined")
 	}
 }
 
-func TestMetricsExposition(t *testing.T) {
-	m := NewMetrics()
+func collect(t *testing.T, r *sdkmetric.ManualReader) map[string]metricdata.Metrics {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := r.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]metricdata.Metrics{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			out[m.Name] = m
+		}
+	}
+	return out
+}
+
+func sumValue(t *testing.T, m metricdata.Metrics, kv ...attribute.KeyValue) int64 {
+	t.Helper()
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("%s is %T, want Sum[int64]", m.Name, m.Data)
+	}
+	want := attribute.NewSet(kv...)
+	for _, dp := range sum.DataPoints {
+		if dp.Attributes.Equals(&want) {
+			return dp.Value
+		}
+	}
+	t.Fatalf("%s has no data point for %v", m.Name, kv)
+	return 0
+}
+
+func histCount(t *testing.T, m metricdata.Metrics, kv ...attribute.KeyValue) uint64 {
+	t.Helper()
+	h, ok := m.Data.(metricdata.Histogram[float64])
+	if !ok {
+		t.Fatalf("%s is %T, want Histogram[float64]", m.Name, m.Data)
+	}
+	want := attribute.NewSet(kv...)
+	for _, dp := range h.DataPoints {
+		if dp.Attributes.Equals(&want) {
+			return dp.Count
+		}
+	}
+	t.Fatalf("%s has no data point for %v", m.Name, kv)
+	return 0
+}
+
+func TestMetricsInstruments(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	m, err := NewMetrics(reader, "siteinfo-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.CacheLookup("imprint", "hit")
 	m.CacheLookup("imprint", "hit")
 	m.SingleflightShared("imprint")
 	m.LockWait("imprint", "acquired", 10*time.Millisecond)
 	m.LoadFinished("imprint", "ok", time.Second)
 	m.InflightLoads(1)
+	m.InflightLoads(1)
+	m.InflightLoads(-1)
 	m.UpstreamCall("ok")
 	m.ObserveRequest("/v1/imprint", "GET", 200, time.Millisecond)
 	m.CacheWriteFailed()
+	m.Rejected("ip_rate")
 
-	rec := httptest.NewRecorder()
-	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
-	body := rec.Body.String()
-	for _, want := range []string{
-		`siteinfo_cache_lookups_total{kind="imprint",outcome="hit"} 1`,
-		`siteinfo_singleflight_shared_total{kind="imprint"} 1`,
-		`siteinfo_lock_wait_seconds_count{kind="imprint",result="acquired"} 1`,
-		`siteinfo_load_duration_seconds_count{kind="imprint",outcome="ok"} 1`,
-		`siteinfo_inflight_loads 1`,
-		`siteinfo_upstream_calls_total{outcome="ok"} 1`,
-		`siteinfo_http_request_duration_seconds_count{method="GET",route="/v1/imprint",status="200"} 1`,
-		`siteinfo_cache_write_failures_total 1`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("missing %q", want)
+	got := collect(t, reader)
+	if v := sumValue(t, got["siteinfo.cache.lookups"], attribute.String("kind", "imprint"), attribute.String("outcome", "hit")); v != 2 {
+		t.Errorf("cache lookups = %d", v)
+	}
+	if v := sumValue(t, got["siteinfo.singleflight.shared"], attribute.String("kind", "imprint")); v != 1 {
+		t.Errorf("shared = %d", v)
+	}
+	if v := sumValue(t, got["siteinfo.loads.inflight"]); v != 1 {
+		t.Errorf("inflight = %d", v)
+	}
+	if v := sumValue(t, got["siteinfo.upstream.calls"], attribute.String("outcome", "ok")); v != 1 {
+		t.Errorf("upstream = %d", v)
+	}
+	if v := sumValue(t, got["siteinfo.cache.write.failures"]); v != 1 {
+		t.Errorf("write failures = %d", v)
+	}
+	if v := sumValue(t, got["siteinfo.protect.rejected"], attribute.String("reason", "ip_rate")); v != 1 {
+		t.Errorf("rejected = %d", v)
+	}
+	if c := histCount(t, got["siteinfo.lock.wait"], attribute.String("kind", "imprint"), attribute.String("result", "acquired")); c != 1 {
+		t.Errorf("lock wait count = %d", c)
+	}
+	if c := histCount(t, got["siteinfo.load.duration"], attribute.String("kind", "imprint"), attribute.String("outcome", "ok")); c != 1 {
+		t.Errorf("load duration count = %d", c)
+	}
+	httpM := got["http.server.request.duration"]
+	if httpM.Unit != "s" {
+		t.Errorf("http duration unit = %q", httpM.Unit)
+	}
+	if c := histCount(t, httpM, attribute.String("http.route", "/v1/imprint"), attribute.String("http.request.method", "GET"), attribute.Int("http.response.status_code", 200)); c != 1 {
+		t.Errorf("http count = %d", c)
+	}
+	var runtimeMetrics int
+	for name := range got {
+		if strings.HasPrefix(name, "go.") {
+			runtimeMetrics++
 		}
+	}
+	if runtimeMetrics == 0 {
+		t.Error("Go runtime metrics are missing")
+	}
+	if err := m.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMetricsWithoutExporterIsSafe(t *testing.T) {
+	r, err := NewReader(context.Background(), MetricsConfig{Exporter: ExporterNone})
+	if err != nil || r != nil {
+		t.Fatalf("reader=%v err=%v", r, err)
+	}
+	m, err := NewMetrics(r, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.CacheLookup("imprint", "hit") // must not panic or block
+	m.ObserveRequest("/x", "GET", 200, time.Second)
+	if err := m.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewReader(context.Background(), MetricsConfig{Exporter: "prometheus"}); err == nil {
+		t.Fatal("unknown exporter must fail")
+	}
+}
+
+// The OTLP/HTTP exporter pushes protobuf to <endpoint>/v1/metrics.
+func TestOTLPExport(t *testing.T) {
+	var gotPath, gotType atomic.Value
+	var body atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotPath.Store(r.URL.Path)
+		gotType.Store(r.Header.Get("Content-Type"))
+		body.Store(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	reader, err := NewReader(context.Background(), MetricsConfig{Exporter: ExporterOTLP, Endpoint: srv.URL, Interval: time.Hour, ServiceName: "siteinfo-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewMetrics(reader, "siteinfo-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.CacheLookup("imprint", "miss")
+	if err := m.ForceFlush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath.Load() != "/v1/metrics" || gotType.Load() != "application/x-protobuf" {
+		t.Fatalf("path=%v type=%v", gotPath.Load(), gotType.Load())
+	}
+	b, _ := body.Load().([]byte)
+	for _, want := range []string{"siteinfo.cache.lookups", "siteinfo-test", "outcome", "miss"} {
+		if !bytes.Contains(b, []byte(want)) {
+			t.Errorf("payload lacks %q", want)
+		}
+	}
+	if err := m.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }

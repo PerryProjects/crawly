@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,8 +44,9 @@ func (r *recorder) LockWait(_, result string, _ time.Duration) { r.inc("lock:" +
 func (r *recorder) LoadFinished(_, outcome string, _ time.Duration) {
 	r.inc("load:" + outcome)
 }
-func (r *recorder) InflightLoads(int) {}
-func (r *recorder) CacheWriteFailed() { r.inc("writefail") }
+func (r *recorder) InflightLoads(int)      {}
+func (r *recorder) CacheWriteFailed()      { r.inc("writefail") }
+func (r *recorder) Rejected(reason string) { r.inc("rejected:" + reason) }
 
 type env struct {
 	mr  *miniredis.Miniredis
@@ -539,5 +541,64 @@ func TestGetOrLoadTyped(t *testing.T) {
 	e.mr.Set(testKey.Cache(), `{"schema_version":1,"status":"ok","data":[1,2]}`)
 	if _, err := GetOrLoad(context.Background(), s, testKey, LoadOptions{}, fetch); err == nil {
 		t.Fatal("expected decode error")
+	}
+}
+
+func TestLoadAdmissionConcurrencyLimit(t *testing.T) {
+	e := newEnv(t)
+	s := e.store(WithLoadLimits(2, 0, 0))
+	var calls atomic.Int32
+	gate := make(chan struct{})
+	done := make(chan error, 2)
+	for _, host := range []string{"a.de", "b.de"} {
+		go func() {
+			_, err := s.Load(context.Background(), Key{Kind: KindImprint, Host: host}, okFetch(&calls, gate), LoadOptions{})
+			done <- err
+		}()
+	}
+	waitFor(t, func() bool { return calls.Load() == 2 })
+
+	// A third distinct host is shed immediately, without touching upstream.
+	_, err := s.Load(context.Background(), Key{Kind: KindImprint, Host: "c.de"}, okFetch(&calls, nil), LoadOptions{})
+	if !errors.Is(err, ErrOverloaded) || calls.Load() != 2 {
+		t.Fatalf("err=%v calls=%d", err, calls.Load())
+	}
+	if e.rec.get("rejected:load_concurrency") != 1 {
+		t.Error("rejection metric missing")
+	}
+	if e.mr.Exists(Key{Kind: KindImprint, Host: "c.de"}.Cache()) {
+		t.Error("an overload rejection must not be cached")
+	}
+	close(gate)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The slot is free again.
+	if _, err := s.Load(context.Background(), Key{Kind: KindImprint, Host: "c.de"}, okFetch(&calls, nil), LoadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadAdmissionRateLimit(t *testing.T) {
+	e := newEnv(t)
+	s := e.store(WithLoadLimits(0, 0.001, 2)) // burst of 2, then effectively nothing
+	var calls atomic.Int32
+	var rejected int
+	for i := range 5 {
+		_, err := s.Load(context.Background(), Key{Kind: KindBrand, Host: fmt.Sprintf("h%d.de", i)}, okFetch(&calls, nil), LoadOptions{})
+		if errors.Is(err, ErrOverloaded) {
+			rejected++
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls.Load() != 2 || rejected != 3 {
+		t.Fatalf("calls=%d rejected=%d, want 2 and 3", calls.Load(), rejected)
+	}
+	// Cache hits never pass through admission control.
+	if entry, err := s.Load(context.Background(), Key{Kind: KindBrand, Host: "h0.de"}, okFetch(&calls, nil), LoadOptions{}); err != nil || !entry.Cached {
+		t.Fatalf("hit under rate limit: %+v %v", entry, err)
 	}
 }

@@ -1,0 +1,41 @@
+# EXAMPLE, NOT PART OF kustomization.yaml AND NOT VALIDATED AGAINST A CLUSTER.
+# The service has app-level protection (per-IP/per-token limits, in-flight cap, load admission),
+# but volumetric DDoS has to be absorbed before it reaches the pods: at the CDN/WAF and the ingress.
+# Check field names against your Traefik version. Order the middlewares so the cheapest checks come first.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: siteinfo-ratelimit
+spec:
+  rateLimit:
+    average: 50          # requests per `period` per source
+    period: 1s
+    burst: 100
+    sourceCriterion:
+      ipStrategy:
+        depth: 1         # number of trusted proxies in front of Traefik (e.g. a cloud LB); 0 = peer address
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: siteinfo-inflight
+spec:
+  inFlightReq:
+    amount: 100          # concurrent requests per source
+    sourceCriterion:
+      ipStrategy:
+        depth: 1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: siteinfo-buffering
+spec:
+  buffering:
+    maxRequestBodyBytes: 1024   # the API takes no request bodies
+---
+# Attach to the route, e.g. IngressRoute.spec.routes[].middlewares:
+#   - name: siteinfo-ratelimit
+#   - name: siteinfo-inflight
+#   - name: siteinfo-buffering
+# Ingress timeouts must stay LONGER than server.handler_timeout (45s), e.g. 60s.

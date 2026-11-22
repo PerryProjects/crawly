@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"math"
 	"net/http"
 	"strconv"
 
@@ -18,18 +17,23 @@ import (
 
 // API error codes.
 const (
-	codeInvalidURL    = "invalid_url"
-	codeInvalidParam  = "invalid_parameter"
-	codeUnauthorized  = "unauthorized"
-	codeNotFound      = "not_found"
-	codeUnavailable   = "unavailable"
-	codeRateLimited   = "upstream_rate_limited"
-	codeTimeout       = "timeout"
-	codeUpstream      = "upstream_error"
-	codeClientClosed  = "client_closed_request"
-	codeInternal      = "internal_error"
-	codeNoImprint     = "imprint_not_found"
-	codeMethodNotAllo = "method_not_allowed"
+	codeInvalidURL   = "invalid_url"
+	codeInvalidParam = "invalid_parameter"
+	codeUnauthorized = "unauthorized"
+	codeNotFound     = "not_found"
+	codeUnavailable  = "unavailable"
+	codeRateLimited  = "upstream_rate_limited"
+
+	codeRateLimitedClient   = "rate_limited"
+	codeRateLimitedToken    = "token_rate_limited"
+	codeTooManyAuthFailures = "too_many_auth_failures"
+	codeOverloaded          = "overloaded"
+	codeTimeout             = "timeout"
+	codeUpstream            = "upstream_error"
+	codeClientClosed        = "client_closed_request"
+	codeInternal            = "internal_error"
+	codeNoImprint           = "imprint_not_found"
+	codeMethodNotAllo       = "method_not_allowed"
 
 	// statusClientClosed is nginx's non-standard "client closed request".
 	statusClientClosed = 499
@@ -59,7 +63,14 @@ func (e notFoundError) Error() string { return e.msg }
 func mapError(err error) apiError {
 	var cached *cache.CachedError
 	var nf notFoundError
+	var le *limitError
 	switch {
+	case errors.As(err, &le):
+		msg := "too many requests, slow down"
+		if le.status == http.StatusServiceUnavailable {
+			msg = "service is overloaded, retry later"
+		}
+		return apiError{status: le.status, code: le.code, message: msg, retryAfter: true}
 	case errors.Is(err, urlnorm.ErrInvalidURL):
 		return apiError{status: http.StatusUnprocessableEntity, code: codeInvalidURL, message: err.Error()}
 	case errors.Is(err, errInvalidParam):
@@ -70,6 +81,8 @@ func mapError(err error) apiError {
 		return apiError{status: http.StatusNotFound, code: nf.code, message: nf.msg}
 	case errors.As(err, &cached):
 		return fromCode(cached.Code)
+	case errors.Is(err, cache.ErrOverloaded):
+		return apiError{status: http.StatusServiceUnavailable, code: codeOverloaded, message: "service is overloaded, retry later", retryAfter: true}
 	case errors.Is(err, cache.ErrLockTimeout), errors.Is(err, cache.ErrStoreUnavailable), errors.Is(err, cache.ErrClosed):
 		return apiError{status: http.StatusServiceUnavailable, code: codeUnavailable, message: "service is busy or shutting down, retry later", retryAfter: true}
 	case errors.Is(err, crawler.ErrRateLimited):
@@ -119,14 +132,19 @@ func (s *Server) handleError(c *echo.Context, err error) {
 	}
 	ae := mapError(err)
 	if ae.status >= 500 && ae.code == codeInternal {
-		observability.LoggerFrom(c.Request().Context(), s.log).Error("unhandled error", zap.Error(err))
+		s.log.Error("unhandled error", observability.Fields(c.Request().Context()), zap.Error(err))
 	}
 	if ae.retryAfter {
-		c.Response().Header().Set(echo.HeaderRetryAfter, strconv.Itoa(int(math.Ceil(s.retryAfter.Seconds()))))
+		wait := s.retryAfter
+		var le *limitError
+		if errors.As(err, &le) && le.retryAfter > 0 {
+			wait = le.retryAfter
+		}
+		c.Response().Header().Set(echo.HeaderRetryAfter, strconv.Itoa(retryAfterSeconds(wait)))
 	}
 	var body errorBody
 	body.Error.Code, body.Error.Message = ae.code, ae.message
 	if jerr := c.JSON(ae.status, body); jerr != nil {
-		observability.LoggerFrom(c.Request().Context(), s.log).Error("writing error response failed", zap.Error(jerr))
+		s.log.Error("writing error response failed", observability.Fields(c.Request().Context()), zap.Error(jerr))
 	}
 }

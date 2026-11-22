@@ -17,6 +17,9 @@ func TestLoadDefaultsAndEnv(t *testing.T) {
 	t.Setenv("SITEINFO_REDIS_MODE", "single")
 	t.Setenv("SITEINFO_REDIS_ADDRS", "redis:6379")
 	t.Setenv("SITEINFO_FIRECRAWL_MAX_CONCURRENCY", "7")
+	t.Setenv("SITEINFO_PROTECT_IP_RATE", "12.5")
+	t.Setenv("SITEINFO_SERVER_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.0.0/16")
+	t.Setenv("SITEINFO_OTEL_ENDPOINT", "http://collector:4318")
 
 	cfg, err := Load("")
 	if err != nil {
@@ -36,6 +39,15 @@ func TestLoadDefaultsAndEnv(t *testing.T) {
 	}
 	if cfg.Firecrawl.MaxConcurrency != 7 {
 		t.Errorf("max concurrency = %d", cfg.Firecrawl.MaxConcurrency)
+	}
+	if cfg.Protect.IPRate != 12.5 || cfg.Protect.IPBurst != 100 {
+		t.Errorf("protect = %+v", cfg.Protect)
+	}
+	if len(cfg.Server.TrustedProxies) != 2 || cfg.Server.TrustedProxies[1] != "192.168.0.0/16" {
+		t.Errorf("trusted proxies = %q", cfg.Server.TrustedProxies)
+	}
+	if cfg.Otel.Endpoint != "http://collector:4318" || cfg.Otel.Exporter != "otlp" {
+		t.Errorf("otel = %+v", cfg.Otel)
 	}
 }
 
@@ -83,6 +95,16 @@ func TestValidate(t *testing.T) {
 		{"zero ttl", func(c *Config) { c.Cache.TTL.Error = 0 }, "cache.ttl.error"},
 		{"no api key for cloud", func(c *Config) { c.Firecrawl.APIKey = "" }, "firecrawl.api_key"},
 		{"no api key for self-hosted", func(c *Config) { c.Firecrawl.APIKey = ""; c.Firecrawl.APIURL = "http://fc:3002" }, ""},
+		{"bad cidr", func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/8", "nope"} }, "trusted_proxies"},
+		{"good cidr", func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/8", "fd00::/8"} }, ""},
+		{"burst missing", func(c *Config) { c.Protect.IPRate, c.Protect.IPBurst = 5, 0 }, "ip_burst"},
+		{"rate disabled needs no burst", func(c *Config) { c.Protect.IPRate, c.Protect.IPBurst = 0, 0 }, ""},
+		{"negative limit", func(c *Config) { c.Protect.MaxInflightRequests = -1 }, "max_inflight_requests"},
+		{"tiny key table", func(c *Config) { c.Protect.MaxTrackedKeys = 10 }, "max_tracked_keys"},
+		{"bad exporter", func(c *Config) { c.Otel.Exporter = "prometheus" }, "otel.exporter"},
+		{"bad otel endpoint", func(c *Config) { c.Otel.Endpoint = "collector:4318" }, "otel.endpoint"},
+		{"good otel endpoint", func(c *Config) { c.Otel.Endpoint = "http://collector:4318" }, ""},
+		{"small header limit", func(c *Config) { c.Server.MaxHeaderBytes = 100 }, "max_header_bytes"},
 		{"bad env", func(c *Config) { c.Env = "staging" }, "env must"},
 	}
 	for _, tt := range tests {

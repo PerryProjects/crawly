@@ -10,6 +10,7 @@ package brand
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -44,6 +45,7 @@ type Typography struct {
 
 // Brand is the cached and served brand result for one host.
 type Brand struct {
+	BrandName   *string    `json:"brand_name"`
 	Logo        *string    `json:"logo"`
 	Favicon     *string    `json:"favicon"`
 	OGImage     *string    `json:"og_image"`
@@ -74,7 +76,7 @@ type Service struct {
 // Option configures optional Service settings.
 type Option func(*Service)
 
-// WithLogger sets the fallback logger.
+// WithLogger sets the logger.
 func WithLogger(l *zap.Logger) Option { return func(s *Service) { s.log = l } }
 
 // NewService returns a Service backed by scraper.
@@ -116,13 +118,17 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Brand, error) {
 	if err != nil {
 		return nil, fmt.Errorf("brand: scrape homepage: %w", err)
 	}
+	if page.StatusCode >= http.StatusBadRequest {
+		// Firecrawl answers HTTP 200 with metadata.statusCode of the target (verified live for a 404).
+		return nil, fmt.Errorf("%w: homepage returned HTTP %d", crawler.ErrUpstream, page.StatusCode)
+	}
 	base, err := url.Parse(page.URL)
 	if err != nil || base.Host == "" {
 		base, _ = url.Parse(homepage)
 	}
 	b := Map(page, base)
 	if page.Branding == nil {
-		observability.LoggerFrom(ctx, s.log).Warn("firecrawl returned no branding payload", zap.String("host", host))
+		s.log.Warn("firecrawl returned no branding payload", observability.Fields(ctx), zap.String("host", host))
 	}
 	return b, nil
 }
@@ -136,6 +142,7 @@ func Map(page *crawler.Page, base *url.URL) *Brand {
 		Typography:  Typography{FontFamilies: map[string]string{}, FontSizes: map[string]string{}, FontWeights: map[string]int{}},
 	}
 
+	b.BrandName = clip(str(br, "brandName"), 200)
 	images := object(br, "images")
 	b.Logo = assetURL(base, first(str(images, "logo"), str(br, "logo")))
 	b.Favicon = assetURL(base, str(images, "favicon"))

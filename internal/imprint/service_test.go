@@ -165,6 +165,16 @@ func TestLookupErrorPropagation(t *testing.T) {
 	}
 }
 
+func TestLookupHomepageErrorStatusIsUpstreamError(t *testing.T) {
+	for _, status := range []int{403, 404, 500, 503} {
+		site := &fakeSite{pages: map[string]*crawler.Page{"https://acme.de/": {URL: "https://acme.de/", StatusCode: status, Markdown: "[Impressum](/impressum)"}}}
+		_, err := newSvc(site).Lookup(context.Background(), "acme.de")
+		if !errors.Is(err, crawler.ErrUpstream) || errors.Is(err, ErrNotFound) || len(site.calls) != 1 {
+			t.Fatalf("status %d: err=%v calls=%v", status, err, site.calls)
+		}
+	}
+}
+
 func TestLookupKeepsTextWhenStructuredExtractionFails(t *testing.T) {
 	page := imprintPage("https://acme.de/impressum")
 	page.JSON = nil

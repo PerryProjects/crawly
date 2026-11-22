@@ -10,6 +10,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/siteinf
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/siteinfo /siteinfo
 USER nonroot:nonroot
-EXPOSE 8080 9090
+EXPOSE 8080
 ENTRYPOINT ["/siteinfo"]
 CMD ["serve"]

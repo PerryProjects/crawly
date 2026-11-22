@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-redsync/redsync/v4"
@@ -15,6 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
+	"golang.org/x/time/rate"
 
 	"github.com/OWNER/siteinfo/internal/observability"
 )
@@ -27,6 +29,7 @@ type Observer interface {
 	LoadFinished(kind, outcome string, d time.Duration)
 	InflightLoads(delta int)
 	CacheWriteFailed()
+	Rejected(reason string)
 }
 
 type noopObserver struct{}
@@ -37,6 +40,7 @@ func (noopObserver) LockWait(string, string, time.Duration)     {}
 func (noopObserver) LoadFinished(string, string, time.Duration) {}
 func (noopObserver) InflightLoads(int)                          {}
 func (noopObserver) CacheWriteFailed()                          {}
+func (noopObserver) Rejected(string)                            {}
 
 // Verdict tells the store how to cache a failed fetch. The zero value (empty
 // Status) means "do not cache, just return the error".
@@ -112,6 +116,9 @@ type Store struct {
 	writeTimeout  time.Duration
 	unlockTimeout time.Duration
 	ttls          TTLs
+	maxLoads      int64         // 0 = unlimited
+	loadLimiter   *rate.Limiter // nil = unlimited
+	activeLoads   atomic.Int64
 	classify      Classifier
 	log           *zap.Logger
 	obs           Observer
@@ -132,6 +139,20 @@ func WithLockRetryDelay(minDelay, maxDelay time.Duration) Option {
 	return func(s *Store) { s.lockDelayMin, s.lockDelayMax = minDelay, maxDelay }
 }
 
+// WithLoadLimits protects the upstream (and its credits) from floods of cache
+// misses, e.g. a client walking through random hostnames. maxConcurrent caps
+// loads running at once in this pod; perSecond/burst is a token bucket on load
+// starts in this pod. Zero disables the respective limit. Rejected loads fail
+// fast with ErrOverloaded instead of queueing behind the crawler.
+func WithLoadLimits(maxConcurrent int, perSecond float64, burst int) Option {
+	return func(s *Store) {
+		s.maxLoads = int64(max(maxConcurrent, 0))
+		if perSecond > 0 {
+			s.loadLimiter = rate.NewLimiter(rate.Limit(perSecond), max(burst, 1))
+		}
+	}
+}
+
 // WithTTLs sets entry lifetimes.
 func WithTTLs(t TTLs) Option { return func(s *Store) { s.ttls = t } }
 
@@ -141,7 +162,7 @@ func WithRefreshCooldown(d time.Duration) Option { return func(s *Store) { s.ref
 // WithClassifier decides which fetch errors are negative-cached.
 func WithClassifier(c Classifier) Option { return func(s *Store) { s.classify = c } }
 
-// WithLogger sets the fallback logger (request-scoped loggers in ctx win).
+// WithLogger sets the logger. Request-scoped fields come from the context (observability.Fields).
 func WithLogger(l *zap.Logger) Option { return func(s *Store) { s.log = l } }
 
 // WithObserver sets the metrics sink.
@@ -288,7 +309,7 @@ func (s *Store) get(ctx context.Context, key Key) (Envelope, bool, error) {
 	env, err := DecodeEnvelope(b)
 	if err != nil {
 		// Unusable entry: drop it and treat as a miss so it gets rebuilt.
-		observability.LoggerFrom(ctx, s.log).Warn("discarding undecodable cache entry", zap.String("key", key.Cache()), zap.Error(err))
+		s.log.Warn("discarding undecodable cache entry", observability.Fields(ctx), zap.String("key", key.Cache()), zap.Error(err))
 		_ = s.rdb.Del(ctx, key.Cache()).Err()
 		return Envelope{}, false, nil
 	}
@@ -301,6 +322,20 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 		return loadResult{err: ErrClosed}
 	}
 	defer s.inflight.Done()
+
+	// Admission control before any work: shed instead of queueing behind the crawler.
+	if s.maxLoads > 0 {
+		if s.activeLoads.Add(1) > s.maxLoads {
+			s.activeLoads.Add(-1)
+			s.obs.Rejected("load_concurrency")
+			return loadResult{err: fmt.Errorf("%w: too many concurrent loads", ErrOverloaded)}
+		}
+		defer s.activeLoads.Add(-1)
+	}
+	if s.loadLimiter != nil && !s.loadLimiter.Allow() {
+		s.obs.Rejected("load_rate")
+		return loadResult{err: fmt.Errorf("%w: load rate limit", ErrOverloaded)}
+	}
 	s.obs.InflightLoads(1)
 	defer s.obs.InflightLoads(-1)
 
@@ -309,12 +344,12 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 	defer cancel()
 
 	kind := string(key.Kind)
-	log := observability.LoggerFrom(ctx, s.log).With(zap.String("kind", kind), zap.String("host", key.Host))
 	start := time.Now()
 	outcome := "error"
 	defer func() {
 		if r := recover(); r != nil { // singleflight would re-panic on an unrecoverable goroutine
-			log.Error("panic during cache load", zap.Any("panic", r), zap.ByteString("stack", debug.Stack()))
+			s.log.Error("panic during cache load", observability.Fields(ctx), zap.String("key", key.Cache()),
+				zap.String("panic", fmt.Sprint(r)), zap.ByteString("stack", debug.Stack()))
 			res = loadResult{err: fmt.Errorf("cache: load panicked: %v", r)}
 			outcome = "panic"
 		}
@@ -341,7 +376,7 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 		uctx, ucancel := context.WithTimeout(context.WithoutCancel(ctx), s.unlockTimeout)
 		defer ucancel()
 		if ok, err := mu.UnlockContext(uctx); err != nil || !ok {
-			log.Warn("releasing load lock failed", zap.Bool("released", ok), zap.Error(err))
+			s.log.Warn("releasing load lock failed", observability.Fields(ctx), zap.String("key", key.Cache()), zap.Bool("released", ok), zap.Error(err))
 		}
 	}()
 
@@ -372,7 +407,7 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 		env.Status, env.ErrorCode = v.Status, v.Code
 	}
 	outcome = string(env.Status)
-	s.store(ctx, log, key, env)
+	s.store(ctx, key, env)
 
 	e := Entry{Envelope: env}
 	if env.Status == StatusError {
@@ -383,10 +418,10 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 
 // store writes the envelope. Failures are logged, not returned: the freshly
 // loaded result is still valid for the caller.
-func (s *Store) store(ctx context.Context, log *zap.Logger, key Key, env Envelope) {
+func (s *Store) store(ctx context.Context, key Key, env Envelope) {
 	b, err := env.Encode()
 	if err != nil {
-		log.Error("encoding cache envelope failed", zap.Error(err))
+		s.log.Error("encoding cache envelope failed", observability.Fields(ctx), zap.String("key", key.Cache()), zap.Error(err))
 		return
 	}
 	// Detached from the load deadline: an expensive result is worth a short grace period.
@@ -401,7 +436,7 @@ func (s *Store) store(ctx context.Context, log *zap.Logger, key Key, env Envelop
 	}
 	if err != nil {
 		s.obs.CacheWriteFailed()
-		log.Error("writing cache entry failed", zap.Error(err))
+		s.log.Error("writing cache entry failed", observability.Fields(ctx), zap.String("key", key.Cache()), zap.Error(err))
 	}
 }
 

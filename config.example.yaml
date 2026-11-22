@@ -9,8 +9,11 @@ log_level: debug
 
 server:
   addr: ":8080"
-  metrics_addr: ":9090"
   shutdown_delay: 1s
+
+# Metrics go out via OpenTelemetry (OTLP/HTTP push). "stdout" prints them, "none" disables export.
+otel:
+  exporter: none
 
 auth:
   enabled: false

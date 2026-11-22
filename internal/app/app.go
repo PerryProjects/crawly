@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
 	"go.uber.org/zap"
+	"golang.org/x/net/netutil"
 
 	"github.com/OWNER/siteinfo/internal/brand"
 	"github.com/OWNER/siteinfo/internal/cache"
@@ -37,15 +39,26 @@ type App struct {
 	store *cache.Store
 	srv   *server.Server
 
-	api       *http.Server
-	metrics   *http.Server
-	apiLn     net.Listener
-	metricsLn net.Listener
+	metrics *observability.Metrics
+	api     *http.Server
+	apiLn   net.Listener
 }
 
 // New builds all components and binds both listeners (so port conflicts fail fast).
 func New(cfg *config.Config, log *zap.Logger) (*App, error) {
-	m := observability.NewMetrics()
+	reader, err := observability.NewReader(context.Background(), observability.MetricsConfig{
+		Exporter: cfg.Otel.Exporter, Endpoint: cfg.Otel.Endpoint, Interval: cfg.Otel.Interval, ServiceName: cfg.Otel.ServiceName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	m, err := observability.NewMetrics(reader, cfg.Otel.ServiceName)
+	if err != nil {
+		return nil, err
+	}
+	// Export failures (collector down) are reported through OTel's process-wide error handler.
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) { log.Warn("opentelemetry error", zap.Error(err)) }))
+
 	rdb, err := newRedis(cfg.Redis)
 	if err != nil {
 		return nil, err
@@ -75,6 +88,7 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 			NotFound: cfg.Cache.TTL.NotFound, Error: cfg.Cache.TTL.Error,
 		}),
 		cache.WithRefreshCooldown(cfg.Cache.RefreshCool),
+		cache.WithLoadLimits(cfg.Protect.MaxConcurrentLoads, cfg.Protect.LoadRate, cfg.Protect.LoadBurst),
 		cache.WithClassifier(classify),
 		cache.WithLogger(log),
 		cache.WithObserver(m),
@@ -86,6 +100,25 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 		server.WithHandlerTimeout(cfg.Server.HandlerTimeout),
 		server.WithRetryAfter(cfg.Server.RetryAfter),
 		server.WithRefresh(cfg.Cache.RefreshEnabled),
+		server.WithProtection(server.Protection{
+			IPRate: cfg.Protect.IPRate, IPBurst: cfg.Protect.IPBurst,
+			TokenRate: cfg.Protect.TokenRate, TokenBurst: cfg.Protect.TokenBurst,
+			AuthFailuresPerMinute: cfg.Protect.AuthFailuresPerMinute,
+			MaxInflight:           cfg.Protect.MaxInflightRequests,
+			MaxTrackedKeys:        cfg.Protect.MaxTrackedKeys,
+		}),
+	}
+	if len(cfg.Server.TrustedProxies) > 0 {
+		nets := make([]*net.IPNet, 0, len(cfg.Server.TrustedProxies))
+		for _, cidr := range cfg.Server.TrustedProxies {
+			_, n, err := net.ParseCIDR(cidr) // validated by config.Validate
+			if err != nil {
+				_ = rdb.Close()
+				return nil, fmt.Errorf("app: trusted proxy %q: %w", cidr, err)
+			}
+			nets = append(nets, n)
+		}
+		srvOpts = append(srvOpts, server.WithTrustedProxies(nets))
 	}
 	if !cfg.Auth.Enabled {
 		log.Warn("authentication is DISABLED; use this for local development only")
@@ -97,36 +130,31 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 		return nil, fmt.Errorf("app: build server: %w", err)
 	}
 
-	a := &App{cfg: cfg, log: log, rdb: rdb, store: store, srv: srv}
+	a := &App{cfg: cfg, log: log, rdb: rdb, store: store, srv: srv, metrics: m}
 	a.api = &http.Server{
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
 		ReadTimeout:       cfg.Server.ReadTimeout,
 		WriteTimeout:      cfg.Server.WriteTimeout, // longer than the handler deadline
 		IdleTimeout:       cfg.Server.IdleTimeout,
+		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
 	}
-	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", m.Handler())
-	a.metrics = &http.Server{Handler: mux, ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout}
 
 	var lc net.ListenConfig
-	if a.apiLn, err = lc.Listen(context.Background(), "tcp", cfg.Server.Addr); err != nil {
+	ln, err := lc.Listen(context.Background(), "tcp", cfg.Server.Addr)
+	if err != nil {
 		_ = rdb.Close()
 		return nil, fmt.Errorf("app: listen on %s: %w", cfg.Server.Addr, err)
 	}
-	if a.metricsLn, err = lc.Listen(context.Background(), "tcp", cfg.Server.MetricsAddr); err != nil {
-		_ = a.apiLn.Close()
-		_ = rdb.Close()
-		return nil, fmt.Errorf("app: listen on %s: %w", cfg.Server.MetricsAddr, err)
+	if cfg.Server.MaxConnections > 0 {
+		ln = netutil.LimitListener(ln, cfg.Server.MaxConnections) // Accept blocks at the cap; excess clients wait in the kernel backlog
 	}
+	a.apiLn = ln
 	return a, nil
 }
 
 // APIAddr is the bound address of the API listener.
 func (a *App) APIAddr() string { return a.apiLn.Addr().String() }
-
-// MetricsAddr is the bound address of the metrics listener.
-func (a *App) MetricsAddr() string { return a.metricsLn.Addr().String() }
 
 // newRedis builds a cluster or single-node client. The mode is explicit:
 // redis.NewUniversalClient would pick a plain client for a single seed address,
@@ -176,18 +204,14 @@ func classify(err error) cache.Verdict {
 //  4. store.Close waits for in-flight loads (bounded by cache.close_timeout)
 //  5. the Redis client is closed
 func (a *App) Run(ctx context.Context) error {
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
-	serve := func(name string, s *http.Server, ln net.Listener) {
-		wg.Go(func() {
-			if err := s.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				errCh <- fmt.Errorf("app: %s server: %w", name, err)
-			}
-		})
-	}
-	serve("api", a.api, a.apiLn)
-	serve("metrics", a.metrics, a.metricsLn)
-	a.log.Info("serving", zap.String("api", a.APIAddr()), zap.String("metrics", a.MetricsAddr()))
+	wg.Go(func() {
+		if err := a.api.Serve(a.apiLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- fmt.Errorf("app: api server: %w", err)
+		}
+	})
+	a.log.Info("serving", zap.String("api", a.APIAddr()), zap.String("otel_exporter", a.cfg.Otel.Exporter))
 
 	var runErr error
 	select {
@@ -226,9 +250,10 @@ func (a *App) shutdown(parent context.Context) error {
 	}
 	cancel()
 
+	// Flush the last metrics after the drain so the final requests and loads are included.
 	ctx, cancel = context.WithTimeout(base, 5*time.Second)
 	if err := a.metrics.Shutdown(ctx); err != nil {
-		errs = append(errs, fmt.Errorf("app: metrics shutdown: %w", err))
+		errs = append(errs, err)
 	}
 	cancel()
 

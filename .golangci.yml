@@ -30,6 +30,7 @@ linters:
     - prealloc
     - usestdlibvars
     - exhaustive
+    - forbidigo        # zap policy: typed fields only (see observability.NewLoggerTo)
   settings:
     govet:
       enable-all: true
@@ -56,6 +57,14 @@ linters:
         - name: context-keys-type
     exhaustive:
       default-signifies-exhaustive: true
+    forbidigo:
+      forbid:
+        - pattern: ^zap\.(Any|Reflect)$
+          msg: zap.Any/zap.Reflect use reflection and allocate; use a typed field or a zapcore.ObjectMarshaler with zap.Inline.
+        - pattern: ^zap\.(S|L|ReplaceGlobals)$
+          msg: no global loggers; inject *zap.Logger.
+        - pattern: \.Sugar$
+          msg: the Sugar API allocates; use typed fields.
     gosec:
       excludes:
         - G404   # math/rand/v2 is used for retry jitter and lock delay only, never for secrets

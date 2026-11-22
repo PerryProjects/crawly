@@ -10,6 +10,8 @@ var (
 	ErrLockTimeout = errors.New("cache: could not acquire load lock in time")
 	// ErrStoreUnavailable means Redis could not be reached.
 	ErrStoreUnavailable = errors.New("cache: redis unavailable")
+	// ErrOverloaded means admission control rejected the load (too many concurrent loads or load rate exceeded).
+	ErrOverloaded = errors.New("cache: load rejected, service overloaded")
 	// ErrClosed means the store is shutting down and accepts no new loads.
 	ErrClosed = errors.New("cache: store closed")
 )

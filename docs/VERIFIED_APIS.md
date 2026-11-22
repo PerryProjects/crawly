@@ -44,3 +44,23 @@ Read from module source (not from memory) on 2026-11-22 with Go 1.27.2.
 ## Go 1.27
 - Generic methods compile (`func (s *S) M[T any]()`), checked with a scratch module. Interfaces still cannot have them,
   and `cache.Loader` is an interface, so `cache.GetOrLoad[T]` is a generic free function.
+
+## OpenTelemetry (go.opentelemetry.io/otel v1.47.0, contrib/instrumentation/runtime v0.72.0)
+- `sdkmetric.NewMeterProvider(WithResource, WithReader)`, `sdkmetric.NewPeriodicReader(exp, WithInterval)`,
+  `sdkmetric.NewManualReader()` + `Collect` for tests.
+- `otlpmetrichttp.New(ctx, opts...)`; `WithEndpoint(host:port)`, `WithURLPath`, `WithInsecure`. **`WithEndpointURL` uses the URL as
+  is (like `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`) and would post to `/`**; a base URL like `http://collector:4318` needs
+  `WithEndpoint` + `WithURLPath("/v1/metrics")` (checked by `TestOTLPExport`).
+- `runtime.Start(runtime.WithMeterProvider(mp))` registers the Go runtime metrics (`go.*`).
+- `otel.SetErrorHandler` is the only process-wide setting touched (routes export errors to zap).
+
+## Echo v5 client IP
+- Default `Context.RealIP()` is the TCP peer. `Config.IPExtractor = echo.ExtractIPFromXFFHeader(echo.TrustLoopback(false),
+  echo.TrustLinkLocal(false), echo.TrustPrivateNet(false), echo.TrustIPRange(cidr)...)` trusts only the listed ranges.
+
+## Observed on the live Firecrawl API (2026-11-22, three DACH sites, see README "Verification")
+- Target-site 404: HTTP 200, `data.metadata.statusCode == 404`. Unknown domain: HTTP 200, `success:false`,
+  `code: SCRAPE_DNS_RESOLUTION_ERROR`.
+- `branding`: keys `colorScheme, fonts[{family,role}], colors{primary,secondary,accent,background,textPrimary,link},
+  typography{fontFamilies,fontStacks,fontSizes}, spacing, components, images{logo,favicon,ogImage,logoHref},
+  personality{tone,energy,targetAudience}, designSystem, confidence, brandName, logo`. The logo may be a `data:image/svg+xml` URI.

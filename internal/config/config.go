@@ -7,6 +7,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -25,6 +27,8 @@ type Config struct {
 	Redis     RedisConfig     `mapstructure:"redis"`
 	Firecrawl FirecrawlConfig `mapstructure:"firecrawl"`
 	Cache     CacheConfig     `mapstructure:"cache"`
+	Protect   ProtectConfig   `mapstructure:"protect"`
+	Otel      OtelConfig      `mapstructure:"otel"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -34,7 +38,6 @@ type Config struct {
 // cache.load_timeout + cache.lock_margin (lock expiry).
 type ServerConfig struct {
 	Addr              string        `mapstructure:"addr"`
-	MetricsAddr       string        `mapstructure:"metrics_addr"`
 	ReadHeaderTimeout time.Duration `mapstructure:"read_header_timeout"`
 	ReadTimeout       time.Duration `mapstructure:"read_timeout"`
 	WriteTimeout      time.Duration `mapstructure:"write_timeout"`
@@ -43,6 +46,37 @@ type ServerConfig struct {
 	RetryAfter        time.Duration `mapstructure:"retry_after"`
 	ShutdownDelay     time.Duration `mapstructure:"shutdown_delay"`
 	ShutdownTimeout   time.Duration `mapstructure:"shutdown_timeout"`
+	MaxHeaderBytes    int           `mapstructure:"max_header_bytes"`
+	// MaxConnections caps simultaneous TCP connections (0 = unlimited).
+	MaxConnections int `mapstructure:"max_connections"`
+	// TrustedProxies are CIDRs of reverse proxies whose X-Forwarded-For is believed when
+	// determining the client IP. Empty (default): the TCP peer address is used, which is
+	// safe but makes every client look like the proxy when one is in front.
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
+}
+
+// ProtectConfig configures overload and abuse protection. A zero rate or limit disables that check.
+// This is defense in depth: volumetric DDoS must be absorbed at the edge (CDN/WAF/ingress).
+type ProtectConfig struct {
+	IPRate                float64 `mapstructure:"ip_rate"` // requests/s per client IP (IPv6: per /64)
+	IPBurst               int     `mapstructure:"ip_burst"`
+	TokenRate             float64 `mapstructure:"token_rate"` // requests/s per API token
+	TokenBurst            int     `mapstructure:"token_burst"`
+	AuthFailuresPerMinute float64 `mapstructure:"auth_failures_per_minute"` // failed logins per IP before it is blocked
+	MaxInflightRequests   int     `mapstructure:"max_inflight_requests"`    // concurrent /v1 requests per pod
+	MaxTrackedKeys        int     `mapstructure:"max_tracked_keys"`         // bound on limiter memory
+	MaxConcurrentLoads    int     `mapstructure:"max_concurrent_loads"`     // concurrent upstream loads per pod
+	LoadRate              float64 `mapstructure:"load_rate"`                // upstream loads/s per pod (cache misses)
+	LoadBurst             int     `mapstructure:"load_burst"`
+}
+
+// OtelConfig configures OpenTelemetry metrics export. The OTLP exporter also honors the
+// standard OTEL_EXPORTER_OTLP_* and OTEL_SERVICE_NAME environment variables.
+type OtelConfig struct {
+	Exporter    string        `mapstructure:"exporter"` // otlp, stdout or none
+	Endpoint    string        `mapstructure:"endpoint"` // OTLP/HTTP base URL, e.g. http://otel-collector:4318
+	Interval    time.Duration `mapstructure:"interval"`
+	ServiceName string        `mapstructure:"service_name"`
 }
 
 // AuthConfig configures static bearer token authentication.
@@ -102,7 +136,6 @@ func Default() Config {
 		LogLevel: "info",
 		Server: ServerConfig{
 			Addr:              ":8080",
-			MetricsAddr:       ":9090",
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      60 * time.Second,
@@ -111,7 +144,19 @@ func Default() Config {
 			RetryAfter:        5 * time.Second,
 			ShutdownDelay:     5 * time.Second,
 			ShutdownTimeout:   50 * time.Second,
+			MaxHeaderBytes:    16 << 10,
+			MaxConnections:    10000,
 		},
+		Protect: ProtectConfig{
+			IPRate: 50, IPBurst: 100,
+			TokenRate: 50, TokenBurst: 100,
+			AuthFailuresPerMinute: 10,
+			MaxInflightRequests:   256,
+			MaxTrackedKeys:        100_000,
+			MaxConcurrentLoads:    16,
+			LoadRate:              2, LoadBurst: 10,
+		},
+		Otel: OtelConfig{Exporter: "otlp", Interval: 30 * time.Second, ServiceName: "siteinfo"},
 		Auth: AuthConfig{Enabled: true},
 		Redis: RedisConfig{
 			Mode:         "cluster",
@@ -175,6 +220,7 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.Auth.Tokens = cleanList(cfg.Auth.Tokens)
 	cfg.Redis.Addrs = cleanList(cfg.Redis.Addrs)
+	cfg.Server.TrustedProxies = cleanList(cfg.Server.TrustedProxies)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -213,9 +259,22 @@ func (c *Config) Validate() error {
 	if c.Env != "dev" && c.Env != "production" {
 		add("env must be dev or production, got %q", c.Env)
 	}
-	if c.Server.Addr == "" || c.Server.MetricsAddr == "" {
-		add("server.addr and server.metrics_addr are required")
+	if c.Server.Addr == "" {
+		add("server.addr is required")
 	}
+	if c.Server.MaxHeaderBytes < 4096 {
+		add("server.max_header_bytes must be >= 4096")
+	}
+	if c.Server.MaxConnections < 0 {
+		add("server.max_connections must not be negative")
+	}
+	for _, cidr := range c.Server.TrustedProxies {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			add("server.trusted_proxies: %q is not a CIDR", cidr)
+		}
+	}
+	c.validateProtect(add)
+	c.validateOtel(add)
 	if c.Auth.Enabled {
 		if len(c.Auth.Tokens) == 0 {
 			add("auth.tokens must contain at least one token while auth.enabled is true")
@@ -285,4 +344,55 @@ func (c *Config) Validate() error {
 		add("server.write_timeout (%s) must be longer than server.handler_timeout (%s)", c.Server.WriteTimeout, c.Server.HandlerTimeout)
 	}
 	return errors.Join(errs...)
+}
+
+func (c *Config) validateProtect(add func(string, ...any)) {
+	p := c.Protect
+	for name, v := range map[string]float64{
+		"protect.ip_rate": p.IPRate, "protect.token_rate": p.TokenRate,
+		"protect.auth_failures_per_minute": p.AuthFailuresPerMinute, "protect.load_rate": p.LoadRate,
+	} {
+		if v < 0 {
+			add("%s must not be negative", name)
+		}
+	}
+	for name, v := range map[string]int{
+		"protect.max_inflight_requests": p.MaxInflightRequests, "protect.max_concurrent_loads": p.MaxConcurrentLoads,
+	} {
+		if v < 0 {
+			add("%s must not be negative", name)
+		}
+	}
+	for _, l := range []struct {
+		name  string
+		rate  float64
+		burst int
+	}{{"protect.ip", p.IPRate, p.IPBurst}, {"protect.token", p.TokenRate, p.TokenBurst}, {"protect.load", p.LoadRate, p.LoadBurst}} {
+		if l.rate > 0 && l.burst < 1 {
+			add("%s_burst must be >= 1 when %s_rate is set", l.name, l.name)
+		}
+	}
+	if p.MaxTrackedKeys < 1000 {
+		add("protect.max_tracked_keys must be >= 1000")
+	}
+}
+
+func (c *Config) validateOtel(add func(string, ...any)) {
+	o := c.Otel
+	switch o.Exporter {
+	case "otlp", "stdout", "none":
+	default:
+		add("otel.exporter must be otlp, stdout or none, got %q", o.Exporter)
+	}
+	if o.Interval <= 0 {
+		add("otel.interval must be positive")
+	}
+	if strings.TrimSpace(o.ServiceName) == "" {
+		add("otel.service_name must not be empty")
+	}
+	if o.Endpoint != "" {
+		if u, err := url.Parse(o.Endpoint); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			add("otel.endpoint must be an http(s) URL, got %q", o.Endpoint)
+		}
+	}
 }

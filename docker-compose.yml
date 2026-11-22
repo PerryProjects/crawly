@@ -20,7 +20,6 @@ services:
         condition: service_healthy
     ports:
       - "8080:8080"
-      - "9090:9090"
     environment:
       SITEINFO_ENV: dev
       SITEINFO_LOG_LEVEL: debug
@@ -29,3 +28,5 @@ services:
       SITEINFO_AUTH_TOKENS: dev-token-0123456789abcdef
       SITEINFO_FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:?set FIRECRAWL_API_KEY}
       SITEINFO_SERVER_SHUTDOWN_DELAY: 1s
+      # Metrics are pushed via OTLP/HTTP. Set an endpoint (e.g. http://otel-collector:4318) to export; "stdout" prints them.
+      SITEINFO_OTEL_EXPORTER: ${SITEINFO_OTEL_EXPORTER:-none}

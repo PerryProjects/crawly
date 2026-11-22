@@ -281,6 +281,7 @@ func TestErrorMapping(t *testing.T) {
 		{"rate limited", fmt.Errorf("x: %w", crawler.ErrRateLimited), 503, "upstream_rate_limited", true},
 		{"lock timeout", fmt.Errorf("x: %w", cache.ErrLockTimeout), 503, "unavailable", true},
 		{"redis down", fmt.Errorf("x: %w", cache.ErrStoreUnavailable), 503, "unavailable", true},
+		{"load shed", fmt.Errorf("x: %w", cache.ErrOverloaded), 503, "overloaded", true},
 		{"shutting down", cache.ErrClosed, 503, "unavailable", true},
 		{"cached upstream failure", &cache.CachedError{Code: crawler.CodeUpstream}, 502, "upstream_error", false},
 		{"cached timeout", &cache.CachedError{Code: crawler.CodeTimeout}, 504, "timeout", false},
@@ -417,8 +418,15 @@ type recordedRequest struct {
 }
 
 type recObserver struct {
-	mu   sync.Mutex
-	reqs []recordedRequest
+	mu       sync.Mutex
+	reqs     []recordedRequest
+	rejected []string
+}
+
+func (r *recObserver) Rejected(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rejected = append(r.rejected, reason)
 }
 
 func (r *recObserver) ObserveRequest(route, method string, status int, _ time.Duration) {

@@ -9,7 +9,7 @@ spec:
   maxReplicas: 6
   metrics:
     # Work is I/O bound (waiting for Firecrawl); CPU is a weak signal. Consider a custom
-    # metric on siteinfo_inflight_loads (prometheus-adapter / KEDA) once traffic is known.
+    # metric on siteinfo.loads.inflight (via an OTel Collector -> metrics adapter / KEDA) once traffic is known.
     - type: Resource
       resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}
   behavior:

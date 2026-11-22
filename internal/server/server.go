@@ -8,7 +8,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
+	"net"
 	"net/http"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,14 +39,28 @@ type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
-// RequestObserver records HTTP request metrics. It is implemented by *observability.Metrics.
+// RequestObserver records HTTP request metrics and protection rejections.
+// It is implemented by *observability.Metrics.
 type RequestObserver interface {
 	ObserveRequest(route, method string, status int, d time.Duration)
+	Rejected(reason string)
 }
 
 type noopRequestObserver struct{}
 
 func (noopRequestObserver) ObserveRequest(string, string, int, time.Duration) {}
+func (noopRequestObserver) Rejected(string)                                   {}
+
+// Protection configures overload and abuse protection for the /v1 routes.
+// A zero rate or limit disables that check. It is defense in depth, not a
+// replacement for edge protection against volumetric DDoS.
+type Protection struct {
+	IPRate, TokenRate     float64 // requests per second per client IP / per API token
+	IPBurst, TokenBurst   int
+	AuthFailuresPerMinute float64 // failed authentications per IP before it is blocked
+	MaxInflight           int     // concurrent /v1 requests in this pod
+	MaxTrackedKeys        int     // bound on limiter memory
+}
 
 // ErrNoTokens is returned by New when auth is enabled but no token is configured.
 var ErrNoTokens = errors.New("server: auth is enabled but no tokens are configured")
@@ -55,6 +73,7 @@ type Server struct {
 	brands    BrandLookup
 	ready     Pinger
 	tokenSums [][sha256.Size]byte
+	tokenKeys []string // limiter key per token index (never the token itself)
 	noAuth    bool
 
 	log            *zap.Logger
@@ -63,6 +82,14 @@ type Server struct {
 	retryAfter     time.Duration
 	readyTimeout   time.Duration
 	refreshEnabled bool
+	trustedProxies []*net.IPNet
+
+	ipLimiter    *keyedLimiter
+	tokenLimiter *keyedLimiter
+	failLimiter  *keyedLimiter
+	inflight     chan struct{}
+	now          func() time.Time
+	entries      sync.Pool // *accessEntry, so the access log allocates nothing per request
 
 	shuttingDown atomic.Bool
 }
@@ -85,6 +112,24 @@ func WithRetryAfter(d time.Duration) Option { return func(s *Server) { s.retryAf
 // WithRefresh allows the refresh=true query parameter (disabled by default).
 func WithRefresh(enabled bool) Option { return func(s *Server) { s.refreshEnabled = enabled } }
 
+// WithProtection enables rate limiting and load shedding on the /v1 routes.
+func WithProtection(p Protection) Option {
+	return func(s *Server) {
+		keys := max(p.MaxTrackedKeys, 1000)
+		s.ipLimiter = newKeyedLimiter(p.IPRate, p.IPBurst, keys)
+		s.tokenLimiter = newKeyedLimiter(p.TokenRate, p.TokenBurst, keys)
+		s.failLimiter = newKeyedLimiter(p.AuthFailuresPerMinute/60, int(math.Ceil(p.AuthFailuresPerMinute)), keys)
+		if p.MaxInflight > 0 {
+			s.inflight = make(chan struct{}, p.MaxInflight)
+		}
+	}
+}
+
+// WithTrustedProxies makes the client IP come from X-Forwarded-For, believing only
+// the given proxy ranges. Without it the TCP peer address is used, because a
+// spoofable header would defeat per-IP limits.
+func WithTrustedProxies(nets []*net.IPNet) Option { return func(s *Server) { s.trustedProxies = nets } }
+
 // WithoutAuth disables bearer authentication. This is for local development only.
 func WithoutAuth() Option { return func(s *Server) { s.noAuth = true } }
 
@@ -95,7 +140,9 @@ func New(loader cache.Loader, imprints ImprintLookup, brands BrandLookup, ready 
 		loader: loader, imprints: imprints, brands: brands, ready: ready,
 		log: zap.NewNop(), obs: noopRequestObserver{},
 		handlerTimeout: 45 * time.Second, retryAfter: 5 * time.Second, readyTimeout: time.Second,
+		now: time.Now,
 	}
+	s.entries.New = func() any { return new(accessEntry) }
 	for _, o := range opts {
 		o(s)
 	}
@@ -106,20 +153,30 @@ func New(loader cache.Loader, imprints ImprintLookup, brands BrandLookup, ready 
 		// Hashing makes the comparison independent of token length.
 		for _, t := range tokens {
 			s.tokenSums = append(s.tokenSums, sha256.Sum256([]byte(t)))
+			s.tokenKeys = append(s.tokenKeys, "token-"+strconv.Itoa(len(s.tokenKeys)))
 		}
 	}
 
-	s.echo = echo.NewWithConfig(echo.Config{
+	cfg := echo.Config{
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)), // we log with zap
 		HTTPErrorHandler: s.handleError,
-	})
+	}
+	if len(s.trustedProxies) > 0 {
+		opts := []echo.TrustOption{echo.TrustLoopback(false), echo.TrustLinkLocal(false), echo.TrustPrivateNet(false)}
+		for _, n := range s.trustedProxies {
+			opts = append(opts, echo.TrustIPRange(n))
+		}
+		cfg.IPExtractor = echo.ExtractIPFromXFFHeader(opts...)
+	}
+	s.echo = echo.NewWithConfig(cfg)
 	s.echo.Use(s.requestID, s.accessLog, s.recoverPanic)
 
 	s.echo.GET("/healthz", s.healthz)
 	s.echo.GET("/readyz", s.readyz)
 	// Auth is attached per route (not via a Group) so a wrong method still yields 405.
-	s.echo.GET("/v1/imprint", s.getImprint, s.authenticate)
-	s.echo.GET("/v1/brand", s.getBrand, s.authenticate)
+	// Order: shed/limit cheaply first (per IP, in-flight cap), then authenticate, then per-token limit.
+	s.echo.GET("/v1/imprint", s.getImprint, s.protect, s.authenticate)
+	s.echo.GET("/v1/brand", s.getBrand, s.protect, s.authenticate)
 	return s, nil
 }
 

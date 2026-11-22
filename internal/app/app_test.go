@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -75,7 +76,8 @@ func testConfig(t *testing.T, redisAddr, firecrawlURL string) *config.Config {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Env = "dev"
-	cfg.Server.Addr, cfg.Server.MetricsAddr = "127.0.0.1:0", "127.0.0.1:0"
+	cfg.Server.Addr = "127.0.0.1:0"
+	cfg.Otel.Exporter = "none"
 	cfg.Server.ShutdownDelay = 150 * time.Millisecond
 	cfg.Auth.Tokens = []string{"app-test-token-0123456789"}
 	cfg.Redis.Mode, cfg.Redis.Addrs = "single", []string{redisAddr}
@@ -182,8 +184,13 @@ func TestServeAndCacheAcrossRequests(t *testing.T) {
 	fc := &fakeFirecrawl{}
 	fcSrv := httptest.NewServer(fc)
 	t.Cleanup(fcSrv.Close)
+	otlp := &otlpCollector{}
+	otlpSrv := httptest.NewServer(otlp)
+	t.Cleanup(otlpSrv.Close)
+
 	cfg := testConfig(t, mr.Addr(), fcSrv.URL)
 	cfg.Server.ShutdownDelay = 0
+	cfg.Otel.Exporter, cfg.Otel.Endpoint, cfg.Otel.ServiceName = "otlp", otlpSrv.URL, "siteinfo-app-test"
 
 	a, err := New(cfg, zap.NewNop())
 	if err != nil {
@@ -192,7 +199,6 @@ func TestServeAndCacheAcrossRequests(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
 	go func() { runDone <- a.Run(ctx) }()
-	t.Cleanup(func() { stop(); <-runDone })
 
 	base, tok := "http://"+a.APIAddr(), "app-test-token-0123456789"
 	code, hdr, body := get(t, base+"/v1/imprint?url=acme.de", tok)
@@ -215,25 +221,48 @@ func TestServeAndCacheAcrossRequests(t *testing.T) {
 		t.Fatalf("negative cache: code=%d hdr=%v calls %d->%d", code, hdr, before, fc.calls.Load())
 	}
 
-	// Metrics are on the separate port and carry no secrets.
-	resp, err := http.Get("http://" + a.MetricsAddr() + "/metrics")
-	if err != nil {
+	if code, _, _ := get(t, base+"/metrics", tok); code != 404 {
+		t.Errorf("there is no /metrics endpoint any more (OTLP push), got %d", code)
+	}
+
+	// Shutdown flushes the final metrics to the OTLP collector.
+	stop()
+	if err := <-runDone; err != nil {
 		t.Fatal(err)
 	}
-	mb, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	for _, want := range []string{"siteinfo_cache_lookups_total", "siteinfo_upstream_calls_total", "siteinfo_http_request_duration_seconds", "siteinfo_inflight_loads"} {
-		if !strings.Contains(string(mb), want) {
-			t.Errorf("metric %s missing", want)
+	payload := otlp.payload()
+	if otlp.path() != "/v1/metrics" {
+		t.Fatalf("collector received no OTLP request (path %q)", otlp.path())
+	}
+	for _, want := range []string{
+		"siteinfo.cache.lookups", "siteinfo.upstream.calls", "http.server.request.duration", "siteinfo.loads.inflight",
+		"siteinfo-app-test", "/v1/imprint", "http.response.status_code", // service name, route and status labels
+	} {
+		if !strings.Contains(payload, want) {
+			t.Errorf("OTLP payload lacks %q", want)
 		}
 	}
-	if strings.Contains(string(mb), tok) || strings.Contains(string(mb), "fc-test") {
-		t.Error("secret in metrics output")
-	}
-	if code, _, _ := get(t, "http://"+a.APIAddr()+"/metrics", tok); code != 404 {
-		t.Errorf("/metrics must not be served on the API port, got %d", code)
+	if strings.Contains(payload, tok) || strings.Contains(payload, "fc-test") {
+		t.Error("secret in exported metrics")
 	}
 }
+
+// otlpCollector is a minimal OTLP/HTTP receiver.
+type otlpCollector struct {
+	mu   sync.Mutex
+	body []byte
+	last string
+}
+
+func (c *otlpCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	b, _ := io.ReadAll(r.Body)
+	c.mu.Lock()
+	c.body, c.last = append(c.body, b...), r.URL.Path
+	c.mu.Unlock()
+}
+
+func (c *otlpCollector) payload() string { c.mu.Lock(); defer c.mu.Unlock(); return string(c.body) }
+func (c *otlpCollector) path() string    { c.mu.Lock(); defer c.mu.Unlock(); return c.last }
 
 func TestNewFailsFastOnBusyPort(t *testing.T) {
 	mr := miniredis.RunT(t)
@@ -243,7 +272,6 @@ func TestNewFailsFastOnBusyPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.apiLn.Close()
-	defer a.metricsLn.Close()
 	cfg2 := *cfg
 	cfg2.Server.Addr = a.APIAddr()
 	if _, err := New(&cfg2, zap.NewNop()); err == nil {

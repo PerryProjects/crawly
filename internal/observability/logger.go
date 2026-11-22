@@ -1,43 +1,98 @@
-// Package observability holds logger helpers and Prometheus metrics.
+// Package observability holds logger helpers and OpenTelemetry metrics.
 package observability
 
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
-// NewLogger builds a zap logger: JSON in production, colored console in dev.
+// NewLogger builds a zap logger on stderr: JSON in production, colored console in dev.
 func NewLogger(env, level string) (*zap.Logger, error) {
+	return NewLoggerTo(env, level, os.Stderr)
+}
+
+// NewLoggerTo is NewLogger with an explicit destination (used by tests and benchmarks).
+//
+// Logging policy (enforced by the forbidigo lint rule): typed zap fields only, never
+// zap.Any / zap.Reflect / the Sugar API, because those use reflection and allocate.
+// Structs are logged by implementing zapcore.ObjectMarshaler and passing them with
+// zap.Inline, which encodes them field by field without reflection or allocation.
+func NewLoggerTo(env, level string, w io.Writer) (*zap.Logger, error) {
 	var lvl zapcore.Level
 	if err := lvl.UnmarshalText([]byte(level)); err != nil {
 		return nil, fmt.Errorf("observability: log level %q: %w", level, err)
 	}
-	var cfg zap.Config
+	var enc zapcore.Encoder
 	if env == "dev" {
-		cfg = zap.NewDevelopmentConfig()
-		cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+		cfg := zap.NewDevelopmentEncoderConfig()
+		cfg.EncodeLevel = zapcore.CapitalColorLevelEncoder
+		enc = zapcore.NewConsoleEncoder(cfg)
 	} else {
-		cfg = zap.NewProductionConfig()
+		enc = zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig())
 	}
-	cfg.Level = zap.NewAtomicLevelAt(lvl)
-	return cfg.Build()
+	core := zapcore.NewCore(enc, zapcore.AddSync(w), lvl)
+	if env != "dev" {
+		// Same defaults as zap's production config: bounded log volume under floods.
+		core = zapcore.NewSamplerWithOptions(core, time.Second, 100, 100)
+	}
+	opts := []zap.Option{zap.ErrorOutput(zapcore.AddSync(os.Stderr))}
+	if env == "dev" {
+		// Capturing the caller allocates on every log call, so it is a dev-only convenience.
+		opts = append(opts, zap.AddCaller())
+	}
+	return zap.New(core, opts...), nil
 }
 
-type loggerKey struct{}
-
-// WithLogger stores a request-scoped logger in ctx.
-func WithLogger(ctx context.Context, l *zap.Logger) context.Context {
-	return context.WithValue(ctx, loggerKey{}, l)
+// RequestFields are the request scoped log fields. They live in the request
+// context and are attached to log calls with Fields, instead of building a child
+// logger (zap.Logger.With) per request, which allocates.
+//
+// RequestID is set once by the request-id middleware. Host and Kind are set by
+// the handler before the cache is called and are read-only afterwards, so
+// detached background loads can read them safely.
+type RequestFields struct {
+	RequestID string
+	Host      string
+	Kind      string
 }
 
-// LoggerFrom returns the request-scoped logger, or fallback when ctx has none.
-// The value survives context.WithoutCancel, so detached loads keep their request_id.
-func LoggerFrom(ctx context.Context, fallback *zap.Logger) *zap.Logger {
-	if l, ok := ctx.Value(loggerKey{}).(*zap.Logger); ok {
-		return l
+// MarshalLogObject implements zapcore.ObjectMarshaler without allocating.
+func (f *RequestFields) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("request_id", f.RequestID)
+	if f.Host != "" {
+		enc.AddString("host", f.Host)
 	}
-	return fallback
+	if f.Kind != "" {
+		enc.AddString("kind", f.Kind)
+	}
+	return nil
+}
+
+type requestFieldsKey struct{}
+
+// WithRequestFields stores f in ctx.
+func WithRequestFields(ctx context.Context, f *RequestFields) context.Context {
+	return context.WithValue(ctx, requestFieldsKey{}, f)
+}
+
+// RequestFieldsFrom returns the request fields in ctx, or nil.
+func RequestFieldsFrom(ctx context.Context) *RequestFields {
+	f, _ := ctx.Value(requestFieldsKey{}).(*RequestFields)
+	return f
+}
+
+// Fields returns the request-scoped fields of ctx as one zap field (a no-op
+// field when ctx has none). The values survive context.WithoutCancel, so
+// detached cache loads keep their request_id.
+func Fields(ctx context.Context) zap.Field {
+	if f := RequestFieldsFrom(ctx); f != nil {
+		return zap.Inline(f)
+	}
+	return zap.Skip()
 }

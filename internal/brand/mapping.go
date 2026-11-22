@@ -76,10 +76,20 @@ func hexColor(s *string) *string {
 	return &h
 }
 
-// assetURL resolves s against base and keeps only http(s) URLs (no data: URIs,
-// which can be megabytes, and no javascript:).
+// maxDataURI bounds inline images. Sites often inline their SVG logo as a data URI
+// (observed on the real API), which is useful, but a data URI can be megabytes.
+const maxDataURI = 32 << 10
+
+// assetURL resolves s against base and keeps only http(s) URLs and small
+// data:image/ URIs (never javascript:, data:text/html and the like).
 func assetURL(base *url.URL, s *string) *string {
 	if s == nil {
+		return nil
+	}
+	if strings.HasPrefix(strings.ToLower(*s), "data:") {
+		if strings.HasPrefix(strings.ToLower(*s), "data:image/") && len(*s) <= maxDataURI {
+			return s
+		}
 		return nil
 	}
 	u, err := url.Parse(*s)

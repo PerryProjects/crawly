@@ -16,16 +16,17 @@ persisted durably; the calling service stores results itself and owns customer o
 ## Contents
 
 - [Architecture](#architecture) · [Cache and lock flow](#cache-and-lock-flow) · [Imprint pipeline](#imprint-pipeline) · [Brand pipeline](#brand-pipeline)
-- [API](#api) · [Configuration](#configuration) · [Operations](#operations-probes-metrics-shutdown-kubernetes)
+- [API](#api) · [Configuration](#configuration) · [Overload and DDoS protection](#overload-and-ddos-protection) · [Operations](#operations-probes-metrics-shutdown-kubernetes)
 - [Development and testing](#development-and-testing)
-- [Assumptions and limitations](#assumptions-and-limitations) · [What is unverified](#what-is-unverified-against-the-real-firecrawl-service) · [How to extend](#how-to-extend)
+- [Assumptions and limitations](#assumptions-and-limitations) · [Verification](#verification-against-the-real-firecrawl-service) · [How to extend](#how-to-extend)
 
 ## Architecture
 
 ```
             GET /v1/imprint?url=   GET /v1/brand?url=
                       │
-              ┌───────▼────────┐  request id, panic recovery, access log + metrics, bearer auth
+              ┌───────▼────────┐  request id, panic recovery, access log + OTel metrics,
+              │ (/v1) per-IP limit, in-flight cap, bearer auth, per-token limit
               │ internal/server│  (Echo v5) URL normalization -> host, handler deadline, error mapping
               └───────┬────────┘
                       │ cache.GetOrLoad[T]            consumer-side interfaces everywhere
@@ -58,7 +59,7 @@ persisted durably; the calling service stores results itself and owns customer o
 | `internal/cache` | Redis store, envelope encoding, singleflight + redsync read-through loader |
 | `internal/imprint` | page discovery, extraction, validation |
 | `internal/brand` | brand extraction and mapping |
-| `internal/observability` | zap logger helpers, Prometheus metrics |
+| `internal/observability` | zap logger helpers (zero-allocation request fields), OpenTelemetry metrics |
 
 Dependency direction: `server` → `cache`, `imprint`, `brand`, `urlnorm` · `imprint`/`brand` → `crawler` ·
 `cache` → `observability`. Interfaces live at the consumer (`server.ImprintLookup`, `imprint.Scraper`,
@@ -100,7 +101,7 @@ Undecodable or wrong-version entries are deleted and treated as a miss.
   cancellation, deadline expiry and Redis problems say nothing about the site and are *never* cached.
 - A failed forced refresh never overwrites a good entry (`error` envelopes are written with `SET NX`).
 - When the pod-local singleflight leader runs a forced refresh, followers that joined share its result.
-- If the Redis `SET` fails after a load, the result is still returned (logged + `siteinfo_cache_write_failures_total`).
+- If the Redis `SET` fails after a load, the result is still returned (logged + `siteinfo.cache.write.failures`).
 - `X-Cache: HIT` also covers "another pod filled it while we waited for the lock" (no upstream call by us).
 - Redis down → lookups return 503 and `/readyz` fails; `/healthz` never touches Redis.
 
@@ -200,17 +201,18 @@ X-Request-Id: 3f9c1d2a7b6e5f40
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" 'http://localhost:8080/v1/brand?url=example.de'
 curl -s -H "Authorization: Bearer $TOKEN" 'http://localhost:8080/v1/imprint?url=example.de&refresh=true'   # only if cache.refresh_enabled
-curl -s localhost:8080/healthz ; curl -s localhost:8080/readyz ; curl -s localhost:9090/metrics
+curl -s localhost:8080/healthz ; curl -s localhost:8080/readyz
 ```
 
 | Status | Meaning |
 |---|---|
 | 200 | ok (`X-Cache: HIT\|MISS`, `cached` flag) |
 | 401 | missing/invalid bearer token (`WWW-Authenticate: Bearer`) |
+| 429 | rate limited: per IP (`rate_limited`), per token (`token_rate_limited`) or blocked after repeated auth failures (`too_many_auth_failures`); `Retry-After` = time until a token is free |
 | 404 | no imprint found (`imprint_not_found`, negative-cached, `X-Cache` set) |
 | 422 | invalid URL (`invalid_url`) or malformed parameter (`invalid_parameter`) |
 | 502 | upstream error for this site (`upstream_error`, cached 5 min) |
-| 503 | lock timeout, Redis down, shutting down, or upstream rate limit — with `Retry-After` |
+| 503 | overloaded (`overloaded`: in-flight cap or load admission), lock timeout, Redis down, shutting down, or upstream rate limit — with `Retry-After` |
 | 504 | upstream or handler timeout (`timeout`) |
 | 499 | client closed the request (non-standard, for log/metric clarity only) |
 
@@ -229,7 +231,6 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | `env` | `SITEINFO_ENV` | `production` | `dev` = console logs, `production` = JSON logs |
 | `log_level` | `SITEINFO_LOG_LEVEL` | `info` | zap level |
 | `server.addr` | `SITEINFO_SERVER_ADDR` | `:8080` | API |
-| `server.metrics_addr` | `SITEINFO_SERVER_METRICS_ADDR` | `:9090` | `/metrics`, internal only |
 | `server.read_header_timeout` | `…_READ_HEADER_TIMEOUT` | `5s` | |
 | `server.read_timeout` | `…_READ_TIMEOUT` | `10s` | |
 | `server.write_timeout` | `…_WRITE_TIMEOUT` | `60s` | must be > `handler_timeout` |
@@ -238,6 +239,9 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | `server.retry_after` | `…_RETRY_AFTER` | `5s` | `Retry-After` on 503 |
 | `server.shutdown_delay` | `…_SHUTDOWN_DELAY` | `5s` | keep serving (not ready) before draining |
 | `server.shutdown_timeout` | `…_SHUTDOWN_TIMEOUT` | `50s` | HTTP drain limit |
+| `server.max_header_bytes` | `…_MAX_HEADER_BYTES` | `16384` | request header limit |
+| `server.max_connections` | `…_MAX_CONNECTIONS` | `10000` | simultaneous TCP connections, `0` = unlimited |
+| `server.trusted_proxies` | `SITEINFO_SERVER_TRUSTED_PROXIES` | – | CIDRs of reverse proxies whose `X-Forwarded-For` is trusted; empty = TCP peer address |
 | `auth.enabled` | `SITEINFO_AUTH_ENABLED` | `true` | disable explicitly for dev only |
 | `auth.tokens` | `SITEINFO_AUTH_TOKENS` | – | ≥ 1 token, ≥ 16 chars each; several allow rotation |
 | `redis.mode` | `SITEINFO_REDIS_MODE` | `cluster` | `cluster` or `single` |
@@ -260,6 +264,17 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | `cache.ttl.error` | `SITEINFO_CACHE_TTL_ERROR` | `5m` | |
 | `cache.refresh_enabled` | `SITEINFO_CACHE_REFRESH_ENABLED` | `false` | allow `refresh=true` |
 | `cache.refresh_cooldown` | `SITEINFO_CACHE_REFRESH_COOLDOWN` | `1h` | per key |
+| `protect.ip_rate` / `ip_burst` | `SITEINFO_PROTECT_IP_RATE` / `…_IP_BURST` | `50` / `100` | requests/s per client IP (IPv6 per /64), `0` = off |
+| `protect.token_rate` / `token_burst` | `SITEINFO_PROTECT_TOKEN_RATE` / `…_TOKEN_BURST` | `50` / `100` | requests/s per API token, `0` = off |
+| `protect.auth_failures_per_minute` | `SITEINFO_PROTECT_AUTH_FAILURES_PER_MINUTE` | `10` | failed authentications per IP before it is blocked, `0` = off |
+| `protect.max_inflight_requests` | `SITEINFO_PROTECT_MAX_INFLIGHT_REQUESTS` | `256` | concurrent `/v1` requests per pod, `0` = off |
+| `protect.max_tracked_keys` | `SITEINFO_PROTECT_MAX_TRACKED_KEYS` | `100000` | bound on limiter memory |
+| `protect.max_concurrent_loads` | `SITEINFO_PROTECT_MAX_CONCURRENT_LOADS` | `16` | concurrent upstream loads per pod, `0` = off |
+| `protect.load_rate` / `load_burst` | `SITEINFO_PROTECT_LOAD_RATE` / `…_LOAD_BURST` | `2` / `10` | upstream loads (cache misses) per second per pod, `0` = off |
+| `otel.exporter` | `SITEINFO_OTEL_EXPORTER` | `otlp` | `otlp`, `stdout` or `none` |
+| `otel.endpoint` | `SITEINFO_OTEL_ENDPOINT` | – | OTLP/HTTP base URL (`http://collector:4318`); empty = standard `OTEL_EXPORTER_OTLP_*` env / `localhost:4318` |
+| `otel.interval` | `SITEINFO_OTEL_INTERVAL` | `30s` | export interval |
+| `otel.service_name` | `SITEINFO_OTEL_SERVICE_NAME` | `siteinfo` | `OTEL_SERVICE_NAME` wins if set |
 
 **Timeout chain** (validated at startup, each stage longer than the one below):
 `firecrawl.timeout 30s` < `cache.load_timeout 40s` < `server.handler_timeout 45s` < lock expiry `50s`;
@@ -267,16 +282,61 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 (≥ 60 s for read/response timeouts, and no idle timeout shorter than the longest request), otherwise the proxy
 cuts requests that the service would still answer.
 
+## Overload and DDoS protection
+
+**Volumetric DDoS must be absorbed at the edge** (CDN/WAF, cloud load balancer, ingress rate limits, network
+policies). A Go service behind a saturated link cannot defend itself. What the service does itself is defense in
+depth, aimed at the two things that actually hurt here: exhausting the pod, and **burning Firecrawl credits**
+(cost amplification: every cache miss costs money, so a client walking through random hostnames is the real attack).
+
+| Layer | Mechanism | Rejection |
+|---|---|---|
+| Connections | `server.max_connections` (accept blocks at the cap), `ReadHeaderTimeout` (slowloris), `MaxHeaderBytes` | – |
+| Per client IP | token bucket `protect.ip_rate/ip_burst`, evaluated first, before authentication; IPv6 grouped by /64 | 429 `rate_limited` |
+| Brute force | `protect.auth_failures_per_minute` failed logins per IP, then that IP gets 429 even with a valid token until the budget refills; successful requests never consume it | 429 `too_many_auth_failures` |
+| Pod capacity | `protect.max_inflight_requests` concurrent `/v1` requests; excess is shed immediately, not queued | 503 `overloaded` |
+| Per API token | token bucket `protect.token_rate/token_burst` (after authentication) | 429 `token_rate_limited` |
+| **Upstream cost** | cache hits are untouched; *misses* pass admission control: `protect.max_concurrent_loads` and `protect.load_rate` per pod. Plus negative caching (`not_found` 24 h, `error` 5 min) and singleflight/lock dedup | 503 `overloaded` |
+
+Details that matter:
+
+- **Client IP.** By default the TCP peer address is used. `X-Forwarded-For` is honored **only** for peers in
+  `server.trusted_proxies`; trusting it blindly would let any client reset its own limit by changing a header. Behind
+  an ingress controller you **must** set the proxy CIDR, otherwise all clients share the ingress IP and one bucket.
+- **Bounded memory.** Limiter state is capped (`protect.max_tracked_keys`), idle buckets are swept, and once the table
+  is full unknown clients share one overflow bucket: under a many-source flood new clients degrade to a shared limit
+  instead of the pod running out of memory.
+- Probes (`/healthz`, `/readyz`) are never limited or shed. All limits are per pod (no shared Redis counters), so the
+  effective limit is `rate × replicas`. Rejections are counted in `siteinfo.protect.rejected{reason}`.
+- Defaults are sized for "one trusted calling service plus a few clients". A single backend behind NAT that sends
+  more than 50 req/s needs higher `protect.ip_rate`/`token_rate`.
+- [`deploy/k8s/traefik-middleware.example.yaml`](deploy/k8s/traefik-middleware.example.yaml) sketches the matching
+  edge rate limit / in-flight / body limits for Traefik (an example, not validated against a cluster).
+
 ## Operations: probes, metrics, shutdown, Kubernetes
 
 - `/healthz` – liveness, no dependencies (a Redis outage must not restart pods).
 - `/readyz` – Redis `PING` (1 s timeout); fails while shutting down.
-- `/metrics` – separate internal port (`server.metrics_addr`), not routed through the API Service.
-  `siteinfo_cache_lookups_total{kind,outcome}`, `siteinfo_singleflight_shared_total`, `siteinfo_lock_wait_seconds`,
-  `siteinfo_load_duration_seconds`, `siteinfo_inflight_loads`, `siteinfo_upstream_calls_total{outcome}`,
-  `siteinfo_http_request_duration_seconds{route,method,status}`, `siteinfo_cache_write_failures_total`.
-- Logs: structured zap (`request_id`, `host`, `cache`). The query string, `Authorization` header and Firecrawl
-  payloads are never logged; error details from upstream/Redis are logged, not returned to clients.
+- **Metrics: OpenTelemetry**, pushed over OTLP/HTTP (`otel.exporter=otlp`, `otel.endpoint`; the standard
+  `OTEL_EXPORTER_OTLP_*` variables such as headers and TLS are honored). There is **no `/metrics` endpoint and no
+  Prometheus client**; if you scrape with Prometheus, let an OpenTelemetry Collector receive OTLP and expose or
+  remote-write it. Pending metrics are flushed on shutdown. Instruments: `siteinfo.cache.lookups{kind,outcome}`,
+  `siteinfo.singleflight.shared`, `siteinfo.lock.wait` (s), `siteinfo.load.duration` (s), `siteinfo.loads.inflight`,
+  `siteinfo.upstream.calls{outcome}`, `siteinfo.cache.write.failures`, `siteinfo.protect.rejected{reason}`,
+  `http.server.request.duration` (s; `http.route`, `http.request.method`, `http.response.status_code`, the OTel
+  semantic-convention name) and the Go runtime metrics (`go.*`). Export errors are logged as warnings.
+  Only metrics are implemented; traces are not.
+- **Logging policy: zap with zero-allocation encoding on the hot path.** Only typed fields are used; `zap.Any`,
+  `zap.Reflect`, `Sugar()` and global loggers are banned by the `forbidigo` lint rule (they use reflection and
+  allocate). Structs are logged by implementing `zapcore.ObjectMarshaler` and passing them with `zap.Inline`
+  (`observability.RequestFields`, the access-log record). Request-scoped fields (`request_id`, `host`, `kind`) travel in
+  the context and are attached per call instead of building a child logger per request. The access log record and its
+  variadic field slice are pooled; `TestAccessLogDoesNotAllocate` and `BenchmarkAccessLog` assert and show **0 allocs/op**
+  (~0.6 µs/op on the dev machine). Production disables caller capture (it allocates; dev keeps it) and samples
+  (100 identical messages/s, then every 100th) to bound log volume under floods. Honest scope: this covers the log calls;
+  the request itself still allocates (context, request-fields struct, OTel attribute sets).
+- Logs never contain the query string, the `Authorization` header or Firecrawl payloads; error details from
+  upstream/Redis are logged, not returned to clients.
 
 **Graceful shutdown** (SIGTERM/SIGINT via `signal.NotifyContext`): (1) `/readyz` starts failing, (2) wait
 `shutdown_delay` while still serving, (3) `http.Server.Shutdown` drains requests (≤ `shutdown_timeout`),
@@ -306,6 +366,10 @@ FIRECRAWL_API_KEY=fc-... docker compose up --build   # Redis (single node) + ser
 - Concurrency tests (`internal/cache`): N goroutines over two simulated pods trigger **exactly one** upstream load;
   caller cancellation does not fail other waiters and the cache still fills; double-check after lock; lock failure
   maps to `ErrLockTimeout`; `Close` waits for in-flight loads; panics in a load become errors.
+- Protection tests: limiter refill/overflow/sweep/memory bound, IPv6 /64 grouping, `X-Forwarded-For` spoofing with and
+  without a trusted proxy, brute-force blocking, per-token limits, in-flight shedding, load admission in the cache.
+  Observability tests read OTel instruments with a manual reader and check a real OTLP/HTTP export against a fake
+  collector. `TestAccessLogDoesNotAllocate` (skipped under `-race`, which instruments allocations) guards the 0-alloc log path.
 - Handler tests use `httptest` with fakes; `internal/app` runs the **full stack** (real wiring and listeners, the
   real Firecrawl SDK against a fake HTTP server, miniredis) including graceful shutdown with a request in flight.
 - **miniredis does not support cluster mode.** All tests use a single-node client. A build-tagged integration test
@@ -340,18 +404,38 @@ FIRECRAWL_API_KEY=fc-... docker compose up --build   # Redis (single node) + ser
   24 h for `not_found` so a newly published imprint is found within a day while not re-probing every request;
   5 min for upstream errors: long enough to absorb retry storms against a broken site, short enough to recover
   quickly from transient failures. Use `refresh=true` (if enabled) to force a reload.
+- **Protection limits are per pod and in memory** (no shared counters): a client spreading requests over N pods gets
+  N times the budget, and a restarted pod forgets its buckets. A Redis-backed limiter would fix that at the price of a
+  Redis round trip on every request; edge limiting is the right place for strict global limits.
+- **OTLP export is best effort.** Metrics are batched and pushed every `otel.interval`; a crash loses the last interval,
+  and an unreachable collector only produces warning logs.
 - **HPA** scales on CPU only as a placeholder; the workload is I/O bound.
 - Redis TLS is not configurable yet. The Go toolchain in use was 1.27.2 (module says `go 1.27`).
 
-## What is unverified against the real Firecrawl service
+## Verification against the real Firecrawl service
 
-No call to the real Firecrawl API could be made. Verified from SDK source: client construction, `Scrape` signature,
-`ScrapeOptions`/`JsonOptions`/`Document` field names, error types, and the JSON request body the SDK produces
-(asserted in tests against a fake server). **Not verified live**: that the format strings `markdown`, `links`,
-`branding` and the `json` format object behave as assumed; the exact `branding` response shape (the SDK types it as
-`map[string]any`; field names come from Firecrawl's docs cookbook and the mapper is tolerant); that `links` includes
-footer links with `onlyMainContent=false`; how a 404 on the *target* site surfaces (SDK error vs
-`metadata.statusCode`; both are handled); retry behavior against real 429/5xx responses; JSON extraction quality.
+One manual smoke test was run on 2026-11-22 against the Firecrawl cloud API (a handful of calls, with the service
+binary and a local Redis): imprint lookups for `tagesschau.de` (DE), `orf.at` (AT) and `srf.ch` (CH), a brand lookup for
+`tagesschau.de`, a raw `branding` scrape, a raw scrape of a missing page and of a non-existent domain, plus the cache
+hit, negative cache and the rate limits on the real binary.
+
+**Confirmed live:** the format strings `markdown`, `links`, `branding` and the `json` format object work as assumed;
+footer links are found with `onlyMainContent=false` (the imprint link was discovered on all three sites); imprint pages
+were extracted for all three countries (one lookup took 5–9 s); the `branding` shape matches the mapper
+(`colorScheme`, `colors.*`, `typography.fontFamilies`, `fonts[{family, role}]`, `images.{logo, favicon, ogImage}`,
+`personality`, `brandName`); a **404 on the target site is HTTP 200 with `metadata.statusCode: 404`** (handled); a
+**non-existent domain is `success:false`, code `SCRAPE_DNS_RESOLUTION_ERROR` on HTTP 200** (the SDK turns it into
+`FirecrawlError{StatusCode: 200}` → 502, negative-cached 5 min).
+
+**Findings that changed the code:** logos are often inline `data:image/svg+xml` URIs (small ones are now kept, large or
+non-image data URIs are dropped); a homepage with an error status is now an upstream error instead of a lookup on an
+error page; `brandName` was added to the brand DTO.
+
+**Still not verified:** retry behavior against real 429/5xx responses (only against a fake server), behavior under
+Firecrawl's concurrency/rate limits, and extraction quality beyond these three sites. Observed limits of the LLM
+extraction: for `orf.at` it listed subsidiaries under `represented_by` and found no address; for `tagesschau.de` the
+e-mail was obfuscated (`webmaster [at] tagesschau.de`), which the validator correctly flags. The raw `text` of
+imprint pages includes navigation and footer noise because the full page is requested.
 
 ## How to extend
 

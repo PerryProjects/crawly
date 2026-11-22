@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/url"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/OWNER/siteinfo/internal/crawler"
@@ -95,7 +96,7 @@ func TestMapEmptyAndHostile(t *testing.T) {
 		t.Fatalf("empty page must yield nulls and empty (non-nil) collections: %+v", b)
 	}
 	hostile := &crawler.Page{Branding: map[string]any{
-		"images":      map[string]any{"logo": "data:image/png;base64,AAAA", "favicon": "javascript:alert(1)", "ogImage": "ftp://x/y.png"},
+		"images":      map[string]any{"logo": "data:text/html,<script>alert(1)</script>", "favicon": "javascript:alert(1)", "ogImage": "ftp://x/y.png"},
 		"colors":      "not an object",
 		"typography":  []any{1, 2},
 		"fonts":       "Arial",
@@ -104,6 +105,28 @@ func TestMapEmptyAndHostile(t *testing.T) {
 	b = Map(hostile, baseURL())
 	if b.Logo != nil || b.Favicon != nil || b.OGImage != nil || b.ColorScheme != nil || len(b.Fonts) != 0 {
 		t.Fatalf("hostile input leaked: %+v", b)
+	}
+}
+
+func TestDataURILogos(t *testing.T) {
+	small := "data:image/svg+xml;utf8,%3Csvg%3E%3C/svg%3E"
+	big := "data:image/png;base64," + strings.Repeat("A", maxDataURI)
+	for name, tc := range map[string]struct{ in, want string }{
+		"small inline svg is kept": {small, small},
+		"oversized is dropped":     {big, ""},
+		"non image is dropped":     {"data:application/javascript,alert(1)", ""},
+	} {
+		page := &crawler.Page{Branding: map[string]any{"images": map[string]any{"logo": tc.in}}}
+		eq(t, name, Map(page, baseURL()).Logo, tc.want)
+	}
+	page := &crawler.Page{Branding: map[string]any{"brandName": " tagesschau.de "}}
+	eq(t, "brand name", Map(page, baseURL()).BrandName, "tagesschau.de")
+}
+
+func TestLookupFailsForErrorStatusHomepage(t *testing.T) {
+	fs := &fakeScraper{page: &crawler.Page{URL: "https://acme.de/", StatusCode: 503}}
+	if _, err := NewService(fs).Lookup(context.Background(), "acme.de"); !errors.Is(err, crawler.ErrUpstream) {
+		t.Fatalf("err = %v", err)
 	}
 }
 
