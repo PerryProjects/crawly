@@ -77,7 +77,9 @@ func (m *Metrics) Handler() http.Handler {
 }
 
 // CacheLookup counts a lookup outcome.
-func (m *Metrics) CacheLookup(kind, outcome string) { m.cacheLookups.WithLabelValues(kind, outcome).Inc() }
+func (m *Metrics) CacheLookup(kind, outcome string) {
+	m.cacheLookups.WithLabelValues(kind, outcome).Inc()
+}
 
 // SingleflightShared counts a caller that piggybacked on another load.
 func (m *Metrics) SingleflightShared(kind string) { m.sfShared.WithLabelValues(kind).Inc() }
