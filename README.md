@@ -516,8 +516,12 @@ error page; `brandName` was added to the brand DTO.
 **Still not verified:** retry behavior against real 429/5xx responses (only against a fake server), behavior under
 Firecrawl's concurrency/rate limits, and extraction quality beyond these three sites. Observed limits of the LLM
 extraction: for `orf.at` it listed subsidiaries under `represented_by` and found no address; for `tagesschau.de` the
-e-mail was obfuscated (`webmaster [at] tagesschau.de`), which the validator correctly flags. The raw `text` of
+e-mail was obfuscated (`webmaster [at] tagesschau.de`), which is now de-obfuscated (`normalized` warning). A later run showed the grounding check at work: for `orf.at` the model returned a VAT ID that does not appear in the imprint text, and it was removed (`unverified_removed`). The raw `text` of
 imprint pages includes navigation and footer noise because the full page is requested.
+
+Observed later: a burst of six lookups exhausted the test account's Firecrawl rate limit; the service answered 503
+`upstream_rate_limited` without caching anything, and the same lookups succeeded a minute later. With several pods,
+the per-pod `firecrawl.max_concurrency` multiplies: size it so that `pods × max_concurrency` fits the Firecrawl plan.
 
 ## How to extend
 
