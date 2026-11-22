@@ -332,8 +332,9 @@ Details that matter:
   Request-scoped fields (`request_id`, `host`, `kind`) travel in the context and are attached per call instead of
   building a child logger per request. The access log record and its variadic field slice are pooled;
   `TestAccessLogDoesNotAllocate` and `BenchmarkAccessLog` assert and show **0 allocs/op** (~0.6 µs/op on the dev
-  machine). Everywhere else performance does not matter: the Sugared logger and `zap.Any` are allowed (only global
-  loggers are banned by the `forbidigo` lint rule). Honest scope: the zero-alloc claim covers the access-log call; the
+  machine). **Everything else uses the Sugared logger** (`Infow`/`Warnw`/`Errorw` with key-value pairs; the
+  request-scoped fields from `observability.Fields(ctx)` are passed as the first pair); performance does not matter
+  there. Only global loggers are banned (`forbidigo`). Honest scope: the zero-alloc claim covers the access-log call; the
   request itself still allocates (context, request-fields struct, OTel attribute sets).
 - **Marshalers keep personal data out of logs.** `MarshalLogObject` decides what a struct reveals. `imprint.Imprint`
   implements it and logs only the imprint URL, country, warning count and text length, never name, address, e-mail or

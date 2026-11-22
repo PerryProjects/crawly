@@ -34,7 +34,7 @@ var (
 // App holds the wired components.
 type App struct {
 	cfg   *config.Config
-	log   *zap.Logger
+	log   *zap.SugaredLogger
 	rdb   redis.UniversalClient
 	store *cache.Store
 	srv   *server.Server
@@ -52,12 +52,13 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	sugar := log.Sugar()
 	m, err := observability.NewMetrics(reader, cfg.Otel.ServiceName)
 	if err != nil {
 		return nil, err
 	}
 	// Export failures (collector down) are reported through OTel's process-wide error handler.
-	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) { log.Warn("opentelemetry error", zap.Error(err)) }))
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) { sugar.Warnw("opentelemetry error", "error", err) }))
 
 	rdb, err := newRedis(cfg.Redis)
 	if err != nil {
@@ -121,7 +122,7 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 		srvOpts = append(srvOpts, server.WithTrustedProxies(nets))
 	}
 	if !cfg.Auth.Enabled {
-		log.Warn("authentication is DISABLED; use this for local development only")
+		sugar.Warn("authentication is DISABLED; use this for local development only")
 		srvOpts = append(srvOpts, server.WithoutAuth())
 	}
 	srv, err := server.New(store, imprints, brands, store, cfg.Auth.Tokens, srvOpts...)
@@ -130,7 +131,7 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 		return nil, fmt.Errorf("app: build server: %w", err)
 	}
 
-	a := &App{cfg: cfg, log: log, rdb: rdb, store: store, srv: srv, metrics: m}
+	a := &App{cfg: cfg, log: sugar, rdb: rdb, store: store, srv: srv, metrics: m}
 	a.api = &http.Server{
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
@@ -211,14 +212,14 @@ func (a *App) Run(ctx context.Context) error {
 			errCh <- fmt.Errorf("app: api server: %w", err)
 		}
 	})
-	a.log.Info("serving", zap.String("api", a.APIAddr()), zap.String("otel_exporter", a.cfg.Otel.Exporter))
+	a.log.Infow("serving", "api", a.APIAddr(), "otel_exporter", a.cfg.Otel.Exporter)
 
 	var runErr error
 	select {
 	case <-ctx.Done():
 		a.log.Info("shutdown signal received")
 	case runErr = <-errCh:
-		a.log.Error("server failed, shutting down", zap.Error(runErr))
+		a.log.Errorw("server failed, shutting down", "error", runErr)
 	}
 
 	shutdownErr := a.shutdown(ctx)
@@ -233,7 +234,7 @@ func (a *App) shutdown(parent context.Context) error {
 
 	a.srv.MarkNotReady()
 	if d := a.cfg.Server.ShutdownDelay; d > 0 {
-		a.log.Info("waiting for endpoint removal", zap.Duration("shutdown_delay", d))
+		a.log.Infow("waiting for endpoint removal", "shutdown_delay", d)
 		time.Sleep(d) // deliberately not interruptible: the point is to keep serving while not ready
 	}
 

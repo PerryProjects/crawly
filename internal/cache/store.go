@@ -120,7 +120,7 @@ type Store struct {
 	loadLimiter   *rate.Limiter // nil = unlimited
 	activeLoads   atomic.Int64
 	classify      Classifier
-	log           *zap.Logger
+	log           *zap.SugaredLogger
 	obs           Observer
 	now           func() time.Time
 }
@@ -163,7 +163,7 @@ func WithRefreshCooldown(d time.Duration) Option { return func(s *Store) { s.ref
 func WithClassifier(c Classifier) Option { return func(s *Store) { s.classify = c } }
 
 // WithLogger sets the logger. Request-scoped fields come from the context (observability.Fields).
-func WithLogger(l *zap.Logger) Option { return func(s *Store) { s.log = l } }
+func WithLogger(l *zap.Logger) Option { return func(s *Store) { s.log = l.Sugar() } }
 
 // WithObserver sets the metrics sink.
 func WithObserver(o Observer) Option { return func(s *Store) { s.obs = o } }
@@ -188,7 +188,7 @@ func NewStore(rdb redis.UniversalClient, opts ...Option) *Store {
 			NotFound: 24 * time.Hour, Error: 5 * time.Minute,
 		},
 		classify: func(error) Verdict { return Verdict{} },
-		log:      zap.NewNop(),
+		log:      zap.NewNop().Sugar(),
 		obs:      noopObserver{},
 		now:      time.Now,
 	}
@@ -309,7 +309,7 @@ func (s *Store) get(ctx context.Context, key Key) (Envelope, bool, error) {
 	env, err := DecodeEnvelope(b)
 	if err != nil {
 		// Unusable entry: drop it and treat as a miss so it gets rebuilt.
-		s.log.Warn("discarding undecodable cache entry", observability.Fields(ctx), zap.String("key", key.Cache()), zap.Error(err))
+		s.log.Warnw("discarding undecodable cache entry", observability.Fields(ctx), "key", key.Cache(), "error", err)
 		_ = s.rdb.Del(ctx, key.Cache()).Err()
 		return Envelope{}, false, nil
 	}
@@ -348,8 +348,8 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 	outcome := "error"
 	defer func() {
 		if r := recover(); r != nil { // singleflight would re-panic on an unrecoverable goroutine
-			s.log.Error("panic during cache load", observability.Fields(ctx), zap.String("key", key.Cache()),
-				zap.String("panic", fmt.Sprint(r)), zap.ByteString("stack", debug.Stack()))
+			s.log.Errorw("panic during cache load", observability.Fields(ctx), "key", key.Cache(),
+				"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
 			res = loadResult{err: fmt.Errorf("cache: load panicked: %v", r)}
 			outcome = "panic"
 		}
@@ -376,7 +376,7 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 		uctx, ucancel := context.WithTimeout(context.WithoutCancel(ctx), s.unlockTimeout)
 		defer ucancel()
 		if ok, err := mu.UnlockContext(uctx); err != nil || !ok {
-			s.log.Warn("releasing load lock failed", observability.Fields(ctx), zap.String("key", key.Cache()), zap.Bool("released", ok), zap.Error(err))
+			s.log.Warnw("releasing load lock failed", observability.Fields(ctx), "key", key.Cache(), "released", ok, "error", err)
 		}
 	}()
 
@@ -421,7 +421,7 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 func (s *Store) store(ctx context.Context, key Key, env Envelope) {
 	b, err := env.Encode()
 	if err != nil {
-		s.log.Error("encoding cache envelope failed", observability.Fields(ctx), zap.String("key", key.Cache()), zap.Error(err))
+		s.log.Errorw("encoding cache envelope failed", observability.Fields(ctx), "key", key.Cache(), "error", err)
 		return
 	}
 	// Detached from the load deadline: an expensive result is worth a short grace period.
@@ -436,7 +436,7 @@ func (s *Store) store(ctx context.Context, key Key, env Envelope) {
 	}
 	if err != nil {
 		s.obs.CacheWriteFailed()
-		s.log.Error("writing cache entry failed", observability.Fields(ctx), zap.String("key", key.Cache()), zap.Error(err))
+		s.log.Errorw("writing cache entry failed", observability.Fields(ctx), "key", key.Cache(), "error", err)
 	}
 }
 

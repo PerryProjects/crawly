@@ -70,18 +70,18 @@ type Scraper interface {
 // Service fetches brand data for a host.
 type Service struct {
 	scraper Scraper
-	log     *zap.Logger
+	log     *zap.SugaredLogger
 }
 
 // Option configures optional Service settings.
 type Option func(*Service)
 
 // WithLogger sets the logger.
-func WithLogger(l *zap.Logger) Option { return func(s *Service) { s.log = l } }
+func WithLogger(l *zap.Logger) Option { return func(s *Service) { s.log = l.Sugar() } }
 
 // NewService returns a Service backed by scraper.
 func NewService(scraper Scraper, opts ...Option) *Service {
-	s := &Service{scraper: scraper, log: zap.NewNop()}
+	s := &Service{scraper: scraper, log: zap.NewNop().Sugar()}
 	for _, o := range opts {
 		o(s)
 	}
@@ -128,7 +128,7 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Brand, error) {
 	}
 	b := Map(page, base)
 	if page.Branding == nil {
-		s.log.Warn("firecrawl returned no branding payload", observability.Fields(ctx), zap.String("host", host))
+		s.log.Warnw("firecrawl returned no branding payload", observability.Fields(ctx), "host", host)
 	}
 	return b, nil
 }

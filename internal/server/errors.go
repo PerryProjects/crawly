@@ -7,7 +7,6 @@ import (
 	"strconv"
 
 	"github.com/labstack/echo/v5"
-	"go.uber.org/zap"
 
 	"github.com/OWNER/siteinfo/internal/cache"
 	"github.com/OWNER/siteinfo/internal/crawler"
@@ -132,7 +131,7 @@ func (s *Server) handleError(c *echo.Context, err error) {
 	}
 	ae := mapError(err)
 	if ae.status >= 500 && ae.code == codeInternal {
-		s.log.Error("unhandled error", observability.Fields(c.Request().Context()), zap.Error(err))
+		s.sugar.Errorw("unhandled error", observability.Fields(c.Request().Context()), "error", err)
 	}
 	if ae.retryAfter {
 		wait := s.retryAfter
@@ -145,6 +144,6 @@ func (s *Server) handleError(c *echo.Context, err error) {
 	var body errorBody
 	body.Error.Code, body.Error.Message = ae.code, ae.message
 	if jerr := c.JSON(ae.status, body); jerr != nil {
-		s.log.Error("writing error response failed", observability.Fields(c.Request().Context()), zap.Error(jerr))
+		s.sugar.Errorw("writing error response failed", observability.Fields(c.Request().Context()), "error", jerr)
 	}
 }

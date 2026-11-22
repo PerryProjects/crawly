@@ -80,13 +80,21 @@ func TestRequestFields(t *testing.T) {
 	// The values must survive context.WithoutCancel (detached cache loads).
 	l.Info("with fields", Fields(context.WithoutCancel(ctx)))
 
+	// The same fields work with the Sugared logger (used for everything except the access log).
+	l.Sugar().Warnw("sugared", Fields(ctx), "key", "imprint:v1:{acme.de}", "error", io.EOF)
+
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
-	if len(lines) != 2 || strings.Contains(lines[0], "request_id") {
+	if len(lines) != 3 || strings.Contains(lines[0], "request_id") {
 		t.Fatalf("lines = %q", lines)
 	}
 	for _, want := range []string{`"request_id":"r1"`, `"host":"acme.de"`, `"kind":"imprint"`} {
 		if !strings.Contains(lines[1], want) {
 			t.Errorf("%s missing in %s", want, lines[1])
+		}
+	}
+	for _, want := range []string{`"request_id":"r1"`, `"host":"acme.de"`, `"key":"imprint:v1:{acme.de}"`, `"error":"EOF"`} {
+		if !strings.Contains(lines[2], want) {
+			t.Errorf("sugared line lacks %s: %s", want, lines[2])
 		}
 	}
 	// Flat, not nested: Inline, not Object.

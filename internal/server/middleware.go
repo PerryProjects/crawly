@@ -141,8 +141,8 @@ func (s *Server) recoverPanic(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c *echo.Context) (err error) {
 		defer func() {
 			if r := recover(); r != nil {
-				s.log.Error("panic in handler", observability.Fields(c.Request().Context()),
-					zap.String("panic", fmt.Sprint(r)), zap.ByteString("stack", debug.Stack()))
+				s.sugar.Errorw("panic in handler", observability.Fields(c.Request().Context()),
+					"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
 				err = fmt.Errorf("panic: %v", r)
 			}
 		}()

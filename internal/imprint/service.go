@@ -32,18 +32,18 @@ var imprintMarkers = []string{
 type Service struct {
 	scraper   Scraper
 	extractor Extractor
-	log       *zap.Logger
+	log       *zap.SugaredLogger
 }
 
 // Option configures optional Service settings.
 type Option func(*Service)
 
 // WithLogger sets the logger.
-func WithLogger(l *zap.Logger) Option { return func(s *Service) { s.log = l } }
+func WithLogger(l *zap.Logger) Option { return func(s *Service) { s.log = l.Sugar() } }
 
 // NewService wires discovery (scraper) and extraction (extractor).
 func NewService(scraper Scraper, extractor Extractor, opts ...Option) *Service {
-	s := &Service{scraper: scraper, extractor: extractor, log: zap.NewNop()}
+	s := &Service{scraper: scraper, extractor: extractor, log: zap.NewNop().Sugar()}
 	for _, o := range opts {
 		o(s)
 	}
@@ -80,11 +80,11 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Imprint, error) {
 			if hardFailure(err) {
 				return nil, err
 			}
-			s.log.Debug("imprint candidate failed", observability.Fields(ctx), zap.String("url", c.URL), zap.Error(err))
+			s.log.Debugw("imprint candidate failed", observability.Fields(ctx), "url", c.URL, "error", err)
 			return nil, nil
 		}
 		if !usable(x) {
-			s.log.Debug("imprint candidate rejected", observability.Fields(ctx), zap.String("url", c.URL), zap.Int("status", x.StatusCode))
+			s.log.Debugw("imprint candidate rejected", observability.Fields(ctx), "url", c.URL, "status", x.StatusCode)
 			return nil, nil
 		}
 		return build(x, c, hosts), nil

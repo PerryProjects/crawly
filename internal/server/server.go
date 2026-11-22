@@ -77,6 +77,7 @@ type Server struct {
 	noAuth    bool
 
 	log            *zap.Logger
+	sugar          *zap.SugaredLogger // everything except the zero-allocation access log
 	obs            RequestObserver
 	handlerTimeout time.Duration
 	retryAfter     time.Duration
@@ -146,6 +147,7 @@ func New(loader cache.Loader, imprints ImprintLookup, brands BrandLookup, ready 
 	for _, o := range opts {
 		o(s)
 	}
+	s.sugar = s.log.Sugar()
 	if !s.noAuth {
 		if len(tokens) == 0 {
 			return nil, ErrNoTokens
@@ -198,7 +200,7 @@ func (s *Server) readyz(c *echo.Context) error {
 	ctx, cancel := context.WithTimeout(c.Request().Context(), s.readyTimeout)
 	defer cancel()
 	if err := s.ready.Ping(ctx); err != nil {
-		s.log.Warn("readiness check failed", zap.Error(err))
+		s.sugar.Warnw("readiness check failed", "error", err)
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{"status": "redis_unavailable"})
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})

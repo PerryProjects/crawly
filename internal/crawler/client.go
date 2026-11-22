@@ -41,7 +41,7 @@ type Client struct {
 	maxRetries  int
 	backoffBase time.Duration
 	maxBackoff  time.Duration
-	log         *zap.Logger
+	log         *zap.SugaredLogger
 	obs         Observer
 	sleep       func(ctx context.Context, d time.Duration) error
 }
@@ -64,7 +64,7 @@ func WithMaxRetries(n int) Option { return func(c *Client) { c.maxRetries = max(
 func WithBackoff(base time.Duration) Option { return func(c *Client) { c.backoffBase = base } }
 
 // WithLogger sets the logger.
-func WithLogger(l *zap.Logger) Option { return func(c *Client) { c.log = l } }
+func WithLogger(l *zap.Logger) Option { return func(c *Client) { c.log = l.Sugar() } }
 
 // WithObserver sets the metrics sink.
 func WithObserver(o Observer) Option { return func(c *Client) { c.obs = o } }
@@ -83,7 +83,7 @@ func New(sc Scraper, opts ...Option) *Client {
 		maxRetries:  2,
 		backoffBase: 500 * time.Millisecond,
 		maxBackoff:  10 * time.Second,
-		log:         zap.NewNop(),
+		log:         zap.NewNop().Sugar(),
 		obs:         noopObserver{},
 		sleep:       sleepCtx,
 	}
@@ -131,7 +131,7 @@ func (c *Client) Scrape(ctx context.Context, url string, req ScrapeRequest) (*Pa
 		if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= delay {
 			return nil, err // not enough budget left to wait and retry
 		}
-		c.log.Debug("retrying firecrawl call", observability.Fields(ctx), zap.Int("attempt", attempt+1), zap.Duration("delay", delay), zap.String("code", ErrorCode(err)))
+		c.log.Debugw("retrying firecrawl call", observability.Fields(ctx), "attempt", attempt+1, "delay", delay, "code", ErrorCode(err))
 		if serr := c.sleep(ctx, delay); serr != nil {
 			return nil, serr
 		}
