@@ -8,10 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"math"
-	"net"
 	"net/http"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,9 +16,9 @@ import (
 	"github.com/labstack/echo/v5"
 	"go.uber.org/zap"
 
-	"github.com/OWNER/siteinfo/internal/brand"
-	"github.com/OWNER/siteinfo/internal/cache"
-	"github.com/OWNER/siteinfo/internal/imprint"
+	"github.com/perryprojects/siteinfo/internal/brand"
+	"github.com/perryprojects/siteinfo/internal/cache"
+	"github.com/perryprojects/siteinfo/internal/imprint"
 )
 
 // ImprintLookup loads an imprint from upstream (the cache miss path).
@@ -51,17 +48,6 @@ type noopRequestObserver struct{}
 func (noopRequestObserver) ObserveRequest(string, string, int, time.Duration) {}
 func (noopRequestObserver) Rejected(string)                                   {}
 
-// Protection configures overload and abuse protection for the /v1 routes.
-// A zero rate or limit disables that check. It is defense in depth, not a
-// replacement for edge protection against volumetric DDoS.
-type Protection struct {
-	IPRate, TokenRate     float64 // requests per second per client IP / per API token
-	IPBurst, TokenBurst   int
-	AuthFailuresPerMinute float64 // failed authentications per IP before it is blocked
-	MaxInflight           int     // concurrent /v1 requests in this pod
-	MaxTrackedKeys        int     // bound on limiter memory
-}
-
 // ErrNoTokens is returned by New when auth is enabled but no token is configured.
 var ErrNoTokens = errors.New("server: auth is enabled but no tokens are configured")
 
@@ -73,7 +59,6 @@ type Server struct {
 	brands    BrandLookup
 	ready     Pinger
 	tokenSums [][sha256.Size]byte
-	tokenKeys []string // limiter key per token index (never the token itself)
 	noAuth    bool
 
 	log            *zap.Logger
@@ -83,14 +68,9 @@ type Server struct {
 	retryAfter     time.Duration
 	readyTimeout   time.Duration
 	refreshEnabled bool
-	trustedProxies []*net.IPNet
 
-	ipLimiter    *keyedLimiter
-	tokenLimiter *keyedLimiter
-	failLimiter  *keyedLimiter
-	inflight     chan struct{}
-	now          func() time.Time
-	entries      sync.Pool // *accessEntry, so the access log allocates nothing per request
+	inflight chan struct{}
+	entries  sync.Pool // *accessEntry, so the access log allocates nothing per request
 
 	debug     bool
 	debugInfo map[string]any
@@ -117,26 +97,18 @@ func WithRetryAfter(d time.Duration) Option { return func(s *Server) { s.retryAf
 // WithRefresh allows the refresh=true query parameter (disabled by default).
 func WithRefresh(enabled bool) Option { return func(s *Server) { s.refreshEnabled = enabled } }
 
-// WithProtection enables rate limiting and load shedding on the /v1 routes.
-func WithProtection(p Protection) Option {
+// WithMaxInflight caps concurrent /v1 requests in this pod; excess requests are shed with 503
+// instead of queueing (0 = unlimited).
+func WithMaxInflight(n int) Option {
 	return func(s *Server) {
-		keys := max(p.MaxTrackedKeys, 1000)
-		s.ipLimiter = newKeyedLimiter(p.IPRate, p.IPBurst, keys)
-		s.tokenLimiter = newKeyedLimiter(p.TokenRate, p.TokenBurst, keys)
-		s.failLimiter = newKeyedLimiter(p.AuthFailuresPerMinute/60, int(math.Ceil(p.AuthFailuresPerMinute)), keys)
-		if p.MaxInflight > 0 {
-			s.inflight = make(chan struct{}, p.MaxInflight)
+		if n > 0 {
+			s.inflight = make(chan struct{}, n)
 		}
 	}
 }
 
-// WithTrustedProxies makes the client IP come from X-Forwarded-For, believing only
-// the given proxy ranges. Without it the TCP peer address is used, because a
-// spoofable header would defeat per-IP limits.
-func WithTrustedProxies(nets []*net.IPNet) Option { return func(s *Server) { s.trustedProxies = nets } }
-
 // WithDebug enables the debugging aids: `debug=1` adds a "_debug" object (trace, cache state) to
-// lookup responses, plus DELETE /v1/debug/cache and GET /v1/debug/config. info is the redacted
+// lookup responses, plus GET /v1/debug/config. info is the redacted
 // effective configuration shown by the latter. Keep this off in production.
 func WithDebug(info map[string]any) Option {
 	return func(s *Server) { s.debug, s.debugInfo = true, info }
@@ -152,7 +124,7 @@ func New(loader cache.Loader, imprints ImprintLookup, brands BrandLookup, ready 
 		loader: loader, imprints: imprints, brands: brands, ready: ready,
 		log: zap.NewNop(), obs: noopRequestObserver{},
 		handlerTimeout: 45 * time.Second, retryAfter: 5 * time.Second, readyTimeout: time.Second,
-		now: time.Now, started: time.Now(),
+		started: time.Now(),
 	}
 	s.entries.New = func() any { return new(accessEntry) }
 	for _, o := range opts {
@@ -166,7 +138,6 @@ func New(loader cache.Loader, imprints ImprintLookup, brands BrandLookup, ready 
 		// Hashing makes the comparison independent of token length.
 		for _, t := range tokens {
 			s.tokenSums = append(s.tokenSums, sha256.Sum256([]byte(t)))
-			s.tokenKeys = append(s.tokenKeys, "token-"+strconv.Itoa(len(s.tokenKeys)))
 		}
 	}
 
@@ -174,25 +145,18 @@ func New(loader cache.Loader, imprints ImprintLookup, brands BrandLookup, ready 
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)), // we log with zap
 		HTTPErrorHandler: s.handleError,
 	}
-	if len(s.trustedProxies) > 0 {
-		opts := []echo.TrustOption{echo.TrustLoopback(false), echo.TrustLinkLocal(false), echo.TrustPrivateNet(false)}
-		for _, n := range s.trustedProxies {
-			opts = append(opts, echo.TrustIPRange(n))
-		}
-		cfg.IPExtractor = echo.ExtractIPFromXFFHeader(opts...)
-	}
 	s.echo = echo.NewWithConfig(cfg)
-	s.echo.Use(s.requestID, s.accessLog, s.recoverPanic)
+	s.echo.Use(s.securityHeaders, s.requestID, s.accessLog, s.recoverPanic)
 
 	s.echo.GET("/healthz", s.healthz)
 	s.echo.GET("/readyz", s.readyz)
 	// Auth is attached per route (not via a Group) so a wrong method still yields 405.
-	// Order: shed/limit cheaply first (per IP, in-flight cap), then authenticate, then per-token limit.
-	s.echo.GET("/v1/imprint", s.getImprint, s.protect, s.authenticate)
-	s.echo.GET("/v1/brand", s.getBrand, s.protect, s.authenticate)
+	s.echo.GET("/v1/imprint", s.getImprint, s.shed, s.authenticate)
+	s.echo.GET("/v1/brand", s.getBrand, s.shed, s.authenticate)
+	// Erasure: removes everything cached about a host (GDPR art. 17 requests, corrections).
+	s.echo.DELETE("/v1/cache", s.purgeCache, s.shed, s.authenticate)
 	if s.debug {
-		s.echo.DELETE("/v1/debug/cache", s.flushCache, s.protect, s.authenticate)
-		s.echo.GET("/v1/debug/config", s.showConfig, s.protect, s.authenticate)
+		s.echo.GET("/v1/debug/config", s.showConfig, s.shed, s.authenticate)
 	}
 	return s, nil
 }

@@ -13,11 +13,11 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/OWNER/siteinfo/internal/brand"
-	"github.com/OWNER/siteinfo/internal/cache"
-	"github.com/OWNER/siteinfo/internal/crawler"
-	"github.com/OWNER/siteinfo/internal/imprint"
-	"github.com/OWNER/siteinfo/internal/observability"
+	"github.com/perryprojects/siteinfo/internal/brand"
+	"github.com/perryprojects/siteinfo/internal/cache"
+	"github.com/perryprojects/siteinfo/internal/crawler"
+	"github.com/perryprojects/siteinfo/internal/imprint"
+	"github.com/perryprojects/siteinfo/internal/observability"
 )
 
 // debugServer wires the real cache over miniredis and lookups that write to the request trace.
@@ -86,7 +86,7 @@ func TestDebugDisabledByDefault(t *testing.T) {
 	if rec.Code != 200 || strings.Contains(rec.Body.String(), "_debug") {
 		t.Fatalf("debug=1 must be ignored while debug mode is off: %d %s", rec.Code, rec.Body)
 	}
-	for _, p := range []struct{ method, path string }{{http.MethodDelete, "/v1/debug/cache?url=acme.de"}, {http.MethodGet, "/v1/debug/config"}} {
+	for _, p := range []struct{ method, path string }{{http.MethodGet, "/v1/debug/config"}} {
 		if rec := do(t, s, p.method, p.path, nil); rec.Code != 404 && rec.Code != 405 {
 			t.Errorf("%s %s = %d, want it absent", p.method, p.path, rec.Code)
 		}
@@ -177,7 +177,7 @@ func TestDebugFlushCache(t *testing.T) {
 		t.Fatalf("calls = %d", *calls)
 	}
 
-	rec := do(t, s, http.MethodDelete, "/v1/debug/cache?url=https://www.acme.de/", nil)
+	rec := do(t, s, http.MethodDelete, "/v1/cache?url=https://www.acme.de/", nil)
 	body := decodeBody(t, rec)
 	if rec.Code != 200 || body["host"] != "acme.de" || body["deleted_keys"] != float64(1) {
 		t.Fatalf("flush: %d %v", rec.Code, body)
@@ -185,13 +185,13 @@ func TestDebugFlushCache(t *testing.T) {
 	if rec := do(t, s, http.MethodGet, "/v1/imprint?url=acme.de", nil); rec.Header().Get("X-Cache") != "MISS" || *calls != 2 {
 		t.Fatalf("after flush: X-Cache=%s calls=%d", rec.Header().Get("X-Cache"), *calls)
 	}
-	if rec := do(t, s, http.MethodDelete, "/v1/debug/cache?url=acme.de&kind=nonsense", nil); rec.Code != 422 || errCode(t, rec) != "invalid_parameter" {
+	if rec := do(t, s, http.MethodDelete, "/v1/cache?url=acme.de&kind=nonsense", nil); rec.Code != 422 || errCode(t, rec) != "invalid_parameter" {
 		t.Fatalf("bad kind: %d %s", rec.Code, rec.Body)
 	}
-	if rec := do(t, s, http.MethodDelete, "/v1/debug/cache?url=localhost", nil); rec.Code != 422 {
+	if rec := do(t, s, http.MethodDelete, "/v1/cache?url=localhost", nil); rec.Code != 422 {
 		t.Fatalf("bad url: %d", rec.Code)
 	}
-	if rec := do(t, s, http.MethodDelete, "/v1/debug/cache?url=acme.de", map[string]string{"Authorization": ""}); rec.Code != 401 {
+	if rec := do(t, s, http.MethodDelete, "/v1/cache?url=acme.de", map[string]string{"Authorization": ""}); rec.Code != 401 {
 		t.Fatalf("flush must require auth: %d", rec.Code)
 	}
 }
@@ -222,7 +222,7 @@ func TestDebugWithLoaderWithoutInspection(t *testing.T) {
 	if rec.Code != 200 || d["cache"] != nil {
 		t.Fatalf("%d %v", rec.Code, d)
 	}
-	if rec := do(t, s, http.MethodDelete, "/v1/debug/cache?url=acme.de", nil); rec.Code != 404 {
+	if rec := do(t, s, http.MethodDelete, "/v1/cache?url=acme.de", nil); rec.Code != 404 {
 		t.Fatalf("flush on a loader without support = %d", rec.Code)
 	}
 }

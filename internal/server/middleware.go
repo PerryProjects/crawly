@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -17,7 +18,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/OWNER/siteinfo/internal/observability"
+	"github.com/perryprojects/siteinfo/internal/observability"
 )
 
 // ctxCache is the echo context key under which handlers record the cache outcome for the access log.
@@ -125,7 +126,7 @@ func (s *Server) accessLog(next echo.HandlerFunc) echo.HandlerFunc {
 		if e.Route == "" {
 			e.Route = "unmatched" // bounded label cardinality
 		}
-		e.Method, e.RemoteIP, e.Duration = c.Request().Method, c.RealIP(), time.Since(start)
+		e.Method, e.RemoteIP, e.Duration = c.Request().Method, anonymizeIP(c.RealIP()), time.Since(start)
 		e.Cache, _ = c.Get(ctxCache).(string)
 
 		s.obs.ObserveRequest(e.Route, e.Method, e.Status, e.Duration)
@@ -150,7 +151,7 @@ func (s *Server) recoverPanic(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
-// limitError is a protection rejection (rate limit or load shedding).
+// limitError is a load-shedding rejection.
 type limitError struct {
 	status     int
 	code       string
@@ -159,47 +160,43 @@ type limitError struct {
 
 func (e *limitError) Error() string { return "rejected: " + e.code }
 
-func (s *Server) reject(status int, code, reason string, wait time.Duration) error {
-	s.obs.Rejected(reason)
-	return &limitError{status: status, code: code, retryAfter: wait}
+// shed caps concurrent /v1 requests: excess requests get 503 at once instead of queueing.
+// There is deliberately no per-client rate limiting; volumetric abuse belongs to the edge
+// (CDN/WAF/ingress), and upstream cost is bounded by the cache's load admission.
+func (s *Server) shed(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		if s.inflight == nil {
+			return next(c)
+		}
+		select {
+		case s.inflight <- struct{}{}:
+			defer func() { <-s.inflight }()
+			return next(c)
+		default:
+			s.obs.Rejected("inflight")
+			return &limitError{status: http.StatusServiceUnavailable, code: codeOverloaded, retryAfter: s.retryAfter}
+		}
+	}
 }
 
-// protect applies the cheap, unauthenticated checks first:
-//
-//  1. per-IP token bucket (429)
-//  2. in-flight cap: shed instead of queueing (503)
-//
-// Repeated authentication failures are handled in authenticate.
-func (s *Server) protect(next echo.HandlerFunc) echo.HandlerFunc {
+// securityHeaders sets defensive headers on every response. The API only serves JSON to other
+// services; nothing may be sniffed, framed, cached by intermediaries or leak a referrer.
+func (s *Server) securityHeaders(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c *echo.Context) error {
-		ip := clientKey(c.RealIP())
-		now := s.now()
-		if s.ipLimiter != nil {
-			if ok, wait := s.ipLimiter.take(ip, now); !ok {
-				return s.reject(http.StatusTooManyRequests, codeRateLimitedClient, "ip_rate", wait)
-			}
-		}
-		if s.inflight != nil {
-			select {
-			case s.inflight <- struct{}{}:
-				defer func() { <-s.inflight }()
-			default:
-				return s.reject(http.StatusServiceUnavailable, codeOverloaded, "inflight", s.retryAfter)
-			}
-		}
+		h := c.Response().Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Cache-Control", "no-store") // responses can contain personal data
 		return next(c)
 	}
 }
 
 var errUnauthorized = errors.New("unauthorized")
 
-// authenticate enforces a static bearer token, compared in constant time, then
-// applies the per-token rate limit.
-//
-// Failed attempts are counted per IP; once an IP exceeds its budget its failures get 429
-// instead of 401. A valid token is never blocked: behind a proxy without trusted_proxies
-// all clients share one IP, and blocking valid tokens there would let anyone lock out every
-// caller. Guessing is not what this prevents (tokens have >= 16 characters); it bounds noise.
+// authenticate enforces a static bearer token, compared in constant time over SHA-256 digests,
+// so neither the token length nor the position of a mismatch leaks through timing.
 func (s *Server) authenticate(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		if s.noAuth {
@@ -207,27 +204,33 @@ func (s *Server) authenticate(next echo.HandlerFunc) echo.HandlerFunc {
 		}
 		got, _ := strings.CutPrefix(c.Request().Header.Get(echo.HeaderAuthorization), "Bearer ")
 		sum := sha256.Sum256([]byte(got))
-		match := -1
-		for i, t := range s.tokenSums { // no early exit: time does not depend on which token matched
-			if subtle.ConstantTimeCompare(sum[:], t[:]) == 1 {
-				match = i
-			}
+		match := 0
+		for _, t := range s.tokenSums { // no early exit: time does not depend on which token matched
+			match |= subtle.ConstantTimeCompare(sum[:], t[:])
 		}
-		now := s.now()
-		if match < 0 {
-			if s.failLimiter != nil {
-				if ok, wait := s.failLimiter.take(clientKey(c.RealIP()), now); !ok {
-					return s.reject(http.StatusTooManyRequests, codeTooManyAuthFailures, "auth_failures", wait)
-				}
-			}
+		if match != 1 {
 			c.Response().Header().Set("WWW-Authenticate", "Bearer")
 			return errUnauthorized
 		}
-		if s.tokenLimiter != nil {
-			if ok, wait := s.tokenLimiter.take(s.tokenKeys[match], now); !ok {
-				return s.reject(http.StatusTooManyRequests, codeRateLimitedToken, "token_rate", wait)
-			}
-		}
 		return next(c)
 	}
+}
+
+// anonymizeIP shortens a client address before it is logged (IPv4 to /24, IPv6 to /48), the
+// usual pseudonymization for access logs: enough to see networks, not enough to identify a person.
+func anonymizeIP(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return "invalid"
+	}
+	addr = addr.Unmap()
+	bits := 24
+	if addr.Is6() {
+		bits = 48
+	}
+	p, err := addr.Prefix(bits)
+	if err != nil {
+		return "invalid"
+	}
+	return p.Addr().String()
 }

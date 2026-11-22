@@ -8,9 +8,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/OWNER/siteinfo/internal/app"
-	"github.com/OWNER/siteinfo/internal/config"
-	"github.com/OWNER/siteinfo/internal/observability"
+	"github.com/perryprojects/siteinfo/internal/app"
+	"github.com/perryprojects/siteinfo/internal/config"
+	"github.com/perryprojects/siteinfo/internal/observability"
 )
 
 func newServeCmd() *cobra.Command {

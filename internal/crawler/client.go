@@ -16,7 +16,7 @@ import (
 	"github.com/firecrawl/firecrawl/apps/go-sdk/option"
 	"go.uber.org/zap"
 
-	"github.com/OWNER/siteinfo/internal/observability"
+	"github.com/perryprojects/siteinfo/internal/observability"
 )
 
 // Scraper is the part of *firecrawl.Client this package needs.
@@ -42,6 +42,7 @@ type Client struct {
 	maxRetries  int
 	country     string
 	languages   []string
+	noStore     bool
 	backoffBase time.Duration
 	maxBackoff  time.Duration
 	log         *zap.SugaredLogger
@@ -73,6 +74,11 @@ func WithBackoff(base time.Duration) Option { return func(c *Client) { c.backoff
 func WithLocation(country string, languages []string) Option {
 	return func(c *Client) { c.country, c.languages = country, languages }
 }
+
+// WithStoreInCache controls whether Firecrawl may keep the scraped pages in its own result cache.
+// Imprint pages contain personal data; with false Firecrawl does not retain them (data
+// minimization). It does not change credit costs (cached results cost the same).
+func WithStoreInCache(store bool) Option { return func(c *Client) { c.noStore = !store } }
 
 // WithLogger sets the logger.
 func WithLogger(l *zap.Logger) Option { return func(c *Client) { c.log = l.Sugar() } }
@@ -231,6 +237,9 @@ func (c *Client) options(req ScrapeRequest) *firecrawl.ScrapeOptions {
 	}
 	if req.JSON != nil {
 		opts.JsonOptions = &firecrawl.JsonOptions{Prompt: req.JSON.Prompt, Schema: req.JSON.Schema}
+	}
+	if c.noStore {
+		opts.StoreInCache = firecrawl.Bool(false)
 	}
 	if c.country != "" {
 		opts.Location = &firecrawl.LocationConfig{Country: c.country, Languages: c.languages}

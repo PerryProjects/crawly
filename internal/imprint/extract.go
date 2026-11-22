@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/OWNER/siteinfo/internal/crawler"
+	"github.com/perryprojects/siteinfo/internal/crawler"
 )
 
 // Scraper is what this package needs from the crawler.

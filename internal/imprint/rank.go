@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/OWNER/siteinfo/internal/urlnorm"
+	"github.com/perryprojects/siteinfo/internal/urlnorm"
 )
 
 // Link is a hyperlink found on a page. Text may be empty.

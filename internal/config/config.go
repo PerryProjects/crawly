@@ -7,7 +7,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -67,25 +66,15 @@ type ServerConfig struct {
 	MaxHeaderBytes    int           `mapstructure:"max_header_bytes"`
 	// MaxConnections caps simultaneous TCP connections (0 = unlimited).
 	MaxConnections int `mapstructure:"max_connections"`
-	// TrustedProxies are CIDRs of reverse proxies whose X-Forwarded-For is believed when
-	// determining the client IP. Empty (default): the TCP peer address is used, which is
-	// safe but makes every client look like the proxy when one is in front.
-	TrustedProxies []string `mapstructure:"trusted_proxies"`
 }
 
-// ProtectConfig configures overload and abuse protection. A zero rate or limit disables that check.
-// This is defense in depth: volumetric DDoS must be absorbed at the edge (CDN/WAF/ingress).
+// ProtectConfig configures overload protection and the bound on upstream spending. A zero value
+// disables that limit. There is no per-client rate limiting; abuse belongs to the edge.
 type ProtectConfig struct {
-	IPRate                float64 `mapstructure:"ip_rate"` // requests/s per client IP (IPv6: per /64)
-	IPBurst               int     `mapstructure:"ip_burst"`
-	TokenRate             float64 `mapstructure:"token_rate"` // requests/s per API token
-	TokenBurst            int     `mapstructure:"token_burst"`
-	AuthFailuresPerMinute float64 `mapstructure:"auth_failures_per_minute"` // failed logins per IP before it is blocked
-	MaxInflightRequests   int     `mapstructure:"max_inflight_requests"`    // concurrent /v1 requests per pod
-	MaxTrackedKeys        int     `mapstructure:"max_tracked_keys"`         // bound on limiter memory
-	MaxConcurrentLoads    int     `mapstructure:"max_concurrent_loads"`     // concurrent upstream loads per pod
-	LoadRate              float64 `mapstructure:"load_rate"`                // upstream loads/s per pod (cache misses)
-	LoadBurst             int     `mapstructure:"load_burst"`
+	MaxInflightRequests int     `mapstructure:"max_inflight_requests"` // concurrent /v1 requests per instance
+	MaxConcurrentLoads  int     `mapstructure:"max_concurrent_loads"`  // concurrent upstream loads per instance
+	LoadRate            float64 `mapstructure:"load_rate"`             // upstream loads/s per instance (cache misses)
+	LoadBurst           int     `mapstructure:"load_burst"`
 }
 
 // OtelConfig configures OpenTelemetry metrics export. The OTLP exporter also honors the
@@ -122,9 +111,12 @@ type FirecrawlConfig struct {
 	APIURL string `mapstructure:"api_url"`
 	// Country (ISO 3166 alpha-2, empty = off) and Languages are sent as Firecrawl's `location`, so
 	// geo-dependent sites answer with their DACH variant. See crawler.WithLocation.
-	Country   string        `mapstructure:"country"`
-	Languages []string      `mapstructure:"languages"`
-	Timeout   time.Duration `mapstructure:"timeout"`
+	Country   string   `mapstructure:"country"`
+	Languages []string `mapstructure:"languages"`
+	// StoreInCache lets Firecrawl keep scraped pages in its result cache. Off by default: imprint
+	// pages contain personal data and the service caches the results itself.
+	StoreInCache bool          `mapstructure:"store_in_cache"`
+	Timeout      time.Duration `mapstructure:"timeout"`
 	// BrandingTimeout is used for the branding scrape, which renders the full page and measured
 	// up to ~30 s on large shops (mediamarkt.de) while plain scrapes take ~1 s.
 	BrandingTimeout time.Duration `mapstructure:"branding_timeout"`
@@ -174,13 +166,9 @@ func Default() Config {
 			MaxConnections:    10000,
 		},
 		Protect: ProtectConfig{
-			IPRate: 50, IPBurst: 100,
-			TokenRate: 50, TokenBurst: 100,
-			AuthFailuresPerMinute: 10,
-			MaxInflightRequests:   256,
-			MaxTrackedKeys:        100_000,
-			MaxConcurrentLoads:    8,
-			LoadRate:              2, LoadBurst: 10,
+			MaxInflightRequests: 256,
+			MaxConcurrentLoads:  8,
+			LoadRate:            2, LoadBurst: 10,
 		},
 		Otel: OtelConfig{Exporter: "otlp", Interval: 30 * time.Second, ServiceName: "siteinfo"},
 		Auth: AuthConfig{Enabled: true},
@@ -251,7 +239,6 @@ func Load(path string) (*Config, error) {
 	cfg.Auth.Tokens = cleanList(cfg.Auth.Tokens)
 	cfg.Redis.Addrs = cleanList(cfg.Redis.Addrs)
 	cfg.Firecrawl.Languages = cleanList(cfg.Firecrawl.Languages)
-	cfg.Server.TrustedProxies = cleanList(cfg.Server.TrustedProxies)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -279,8 +266,8 @@ func cleanList(in []string) []string {
 	return out
 }
 
-// minTokenLen guards against trivially guessable bearer tokens.
-const minTokenLen = 16
+// minTokenLen guards against guessable bearer tokens; use random values (e.g. openssl rand -hex 32).
+const minTokenLen = 32
 
 // Validate checks value ranges and the timeout chain.
 func (c *Config) Validate() error {
@@ -301,11 +288,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.MaxConnections < 0 {
 		add("server.max_connections must not be negative")
-	}
-	for _, cidr := range c.Server.TrustedProxies {
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			add("server.trusted_proxies: %q is not a CIDR", cidr)
-		}
 	}
 	c.validateProtect(add)
 	c.validateOtel(add)
@@ -387,13 +369,8 @@ func (c *Config) Validate() error {
 
 func (c *Config) validateProtect(add func(string, ...any)) {
 	p := c.Protect
-	for name, v := range map[string]float64{
-		"protect.ip_rate": p.IPRate, "protect.token_rate": p.TokenRate,
-		"protect.auth_failures_per_minute": p.AuthFailuresPerMinute, "protect.load_rate": p.LoadRate,
-	} {
-		if v < 0 {
-			add("%s must not be negative", name)
-		}
+	if p.LoadRate < 0 {
+		add("protect.load_rate must not be negative")
 	}
 	for name, v := range map[string]int{
 		"protect.max_inflight_requests": p.MaxInflightRequests, "protect.max_concurrent_loads": p.MaxConcurrentLoads,
@@ -402,17 +379,8 @@ func (c *Config) validateProtect(add func(string, ...any)) {
 			add("%s must not be negative", name)
 		}
 	}
-	for _, l := range []struct {
-		name  string
-		rate  float64
-		burst int
-	}{{"protect.ip", p.IPRate, p.IPBurst}, {"protect.token", p.TokenRate, p.TokenBurst}, {"protect.load", p.LoadRate, p.LoadBurst}} {
-		if l.rate > 0 && l.burst < 1 {
-			add("%s_burst must be >= 1 when %s_rate is set", l.name, l.name)
-		}
-	}
-	if p.MaxTrackedKeys < 1000 {
-		add("protect.max_tracked_keys must be >= 1000")
+	if p.LoadRate > 0 && p.LoadBurst < 1 {
+		add("protect.load_burst must be >= 1 when protect.load_rate is set")
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/net/publicsuffix"
 
-	"github.com/OWNER/siteinfo/internal/observability"
+	"github.com/perryprojects/siteinfo/internal/observability"
 )
 
 // ScrapeHomepage fetches https://<host>/ and treats an error status of the target as ErrUpstream.

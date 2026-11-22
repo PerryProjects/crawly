@@ -3,15 +3,17 @@ package server
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/labstack/echo/v5"
 
-	"github.com/OWNER/siteinfo/internal/cache"
-	"github.com/OWNER/siteinfo/internal/crawler"
-	"github.com/OWNER/siteinfo/internal/observability"
-	"github.com/OWNER/siteinfo/internal/urlnorm"
+	"github.com/perryprojects/siteinfo/internal/cache"
+	"github.com/perryprojects/siteinfo/internal/crawler"
+	"github.com/perryprojects/siteinfo/internal/observability"
+	"github.com/perryprojects/siteinfo/internal/urlnorm"
 )
 
 // API error codes.
@@ -23,16 +25,13 @@ const (
 	codeUnavailable  = "unavailable"
 	codeRateLimited  = "upstream_rate_limited"
 
-	codeRateLimitedClient   = "rate_limited"
-	codeRateLimitedToken    = "token_rate_limited"
-	codeTooManyAuthFailures = "too_many_auth_failures"
-	codeOverloaded          = "overloaded"
-	codeTimeout             = "timeout"
-	codeUpstream            = "upstream_error"
-	codeClientClosed        = "client_closed_request"
-	codeInternal            = "internal_error"
-	codeNoImprint           = "imprint_not_found"
-	codeMethodNotAllo       = "method_not_allowed"
+	codeOverloaded    = "overloaded"
+	codeTimeout       = "timeout"
+	codeUpstream      = "upstream_error"
+	codeClientClosed  = "client_closed_request"
+	codeInternal      = "internal_error"
+	codeNoImprint     = "imprint_not_found"
+	codeMethodNotAllo = "method_not_allowed"
 
 	// statusClientClosed is nginx's non-standard "client closed request".
 	statusClientClosed = 499
@@ -65,11 +64,7 @@ func mapError(err error) apiError {
 	var le *limitError
 	switch {
 	case errors.As(err, &le):
-		msg := "too many requests, slow down"
-		if le.status == http.StatusServiceUnavailable {
-			msg = "service is overloaded, retry later"
-		}
-		return apiError{status: le.status, code: le.code, message: msg, retryAfter: true}
+		return apiError{status: le.status, code: le.code, message: "service is overloaded, retry later", retryAfter: true}
 	case errors.Is(err, urlnorm.ErrInvalidURL):
 		return apiError{status: http.StatusUnprocessableEntity, code: codeInvalidURL, message: err.Error()}
 	case errors.Is(err, errInvalidParam):
@@ -156,4 +151,9 @@ func (s *Server) handleError(c *echo.Context, err error) {
 	if jerr := c.JSON(ae.status, body); jerr != nil {
 		s.sugar.Errorw("writing error response failed", observability.Fields(c.Request().Context()), "error", jerr)
 	}
+}
+
+// retryAfterSeconds renders a wait as a whole-second Retry-After value (at least 1).
+func retryAfterSeconds(d time.Duration) int {
+	return max(int(math.Ceil(d.Seconds())), 1)
 }

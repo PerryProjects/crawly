@@ -8,12 +8,12 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"github.com/OWNER/siteinfo/internal/brand"
-	"github.com/OWNER/siteinfo/internal/cache"
-	"github.com/OWNER/siteinfo/internal/crawler"
-	"github.com/OWNER/siteinfo/internal/imprint"
-	"github.com/OWNER/siteinfo/internal/observability"
-	"github.com/OWNER/siteinfo/internal/urlnorm"
+	"github.com/perryprojects/siteinfo/internal/brand"
+	"github.com/perryprojects/siteinfo/internal/cache"
+	"github.com/perryprojects/siteinfo/internal/crawler"
+	"github.com/perryprojects/siteinfo/internal/imprint"
+	"github.com/perryprojects/siteinfo/internal/observability"
+	"github.com/perryprojects/siteinfo/internal/urlnorm"
 )
 
 // Response headers.
@@ -121,4 +121,37 @@ func serve[T any](s *Server, c *echo.Context, kind cache.Kind, notFound error,
 		return notFound
 	}
 	return c.JSON(http.StatusOK, render(res.Data, host, res, blk))
+}
+
+// purgeCache deletes everything cached about a host (entries and refresh cooldowns). It serves
+// erasure requests (GDPR art. 17) and lets callers force a reload after a correction.
+func (s *Server) purgeCache(c *echo.Context) error {
+	norm, err := urlnorm.Normalize(c.QueryParam("url"))
+	if err != nil {
+		return err
+	}
+	dc, ok := s.loader.(cacheDebugger)
+	if !ok {
+		return notFoundError{codeNotFound, "this cache backend does not support flushing"}
+	}
+	kinds := []cache.Kind{cache.KindImprint, cache.KindBrand}
+	switch k := c.QueryParam("kind"); k {
+	case "", "all":
+	case string(cache.KindImprint), string(cache.KindBrand):
+		kinds = []cache.Kind{cache.Kind(k)}
+	default:
+		return paramError{`kind must be "imprint", "brand" or "all"`}
+	}
+	var deleted int64
+	keys := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		key := cache.Key{Kind: k, Host: norm.Host}
+		n, err := dc.Flush(c.Request().Context(), key)
+		if err != nil {
+			return err
+		}
+		deleted += n
+		keys = append(keys, key.Cache())
+	}
+	return c.JSON(http.StatusOK, map[string]any{"host": norm.Host, "deleted_keys": deleted, "keys": keys})
 }

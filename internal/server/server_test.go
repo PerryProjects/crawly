@@ -15,11 +15,11 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/OWNER/siteinfo/internal/brand"
-	"github.com/OWNER/siteinfo/internal/cache"
-	"github.com/OWNER/siteinfo/internal/crawler"
-	"github.com/OWNER/siteinfo/internal/imprint"
-	"github.com/OWNER/siteinfo/internal/urlnorm"
+	"github.com/perryprojects/siteinfo/internal/brand"
+	"github.com/perryprojects/siteinfo/internal/cache"
+	"github.com/perryprojects/siteinfo/internal/crawler"
+	"github.com/perryprojects/siteinfo/internal/imprint"
+	"github.com/perryprojects/siteinfo/internal/urlnorm"
 )
 
 const token = "test-token-0123456789"

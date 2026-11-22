@@ -447,3 +447,32 @@ func TestPerRequestTimeout(t *testing.T) {
 		t.Fatalf("firecrawl timeout = %v", body["timeout"])
 	}
 }
+
+func TestStoreInCacheOption(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		opts  []Option
+		want  any
+		isSet bool
+	}{
+		{"default leaves Firecrawl's default", nil, nil, false},
+		{"disabled sends false", []Option{WithStoreInCache(false)}, false, true},
+		{"enabled leaves Firecrawl's default", []Option{WithStoreInCache(true)}, nil, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var body map[string]any
+			c := newSDKClient(t, func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(b, &body)
+				_, _ = io.WriteString(w, `{"success":true,"data":{"markdown":"x"}}`)
+			}, tt.opts...)
+			if _, err := c.Scrape(context.Background(), "https://example.de/", ScrapeRequest{Markdown: true}); err != nil {
+				t.Fatal(err)
+			}
+			v, ok := body["storeInCache"]
+			if ok != tt.isSet || v != tt.want {
+				t.Fatalf("storeInCache = %v (set %v), want %v (set %v)", v, ok, tt.want, tt.isSet)
+			}
+		})
+	}
+}

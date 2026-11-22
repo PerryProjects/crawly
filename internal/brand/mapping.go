@@ -1,6 +1,7 @@
 package brand
 
 import (
+	"encoding/base64"
 	"net/url"
 	"regexp"
 	"slices"
@@ -80,6 +81,36 @@ func hexColor(s *string) *string {
 // (observed on the real API), which is useful, but a data URI can be megabytes.
 const maxDataURI = 32 << 10
 
+var reSVGActive = regexp.MustCompile(`(?i)<\s*(script|foreignobject|iframe|embed|object|handler)|\bon[a-z]+\s*=|javascript:|@import|<!entity`)
+
+// activeSVG reports whether an SVG data URI carries active content (scripts, event handlers,
+// embedded documents). Such logos are dropped: a caller that renders the logo with something
+// other than <img> would otherwise execute third-party script. Other image types pass.
+func activeSVG(dataURI string) bool {
+	meta, payload, ok := strings.Cut(dataURI, ",")
+	if !ok {
+		return true
+	}
+	if !strings.Contains(strings.ToLower(meta), "svg") {
+		return false
+	}
+	var body string
+	if strings.HasSuffix(strings.ToLower(meta), ";base64") {
+		b, err := base64.StdEncoding.DecodeString(payload)
+		if err != nil {
+			return true
+		}
+		body = string(b)
+	} else {
+		u, err := url.PathUnescape(payload)
+		if err != nil {
+			return true
+		}
+		body = u
+	}
+	return reSVGActive.MatchString(body)
+}
+
 // assetURL resolves s against base and keeps only http(s) URLs and small
 // data:image/ URIs (never javascript:, data:text/html and the like).
 func assetURL(base *url.URL, s *string) *string {
@@ -87,7 +118,7 @@ func assetURL(base *url.URL, s *string) *string {
 		return nil
 	}
 	if strings.HasPrefix(strings.ToLower(*s), "data:") {
-		if strings.HasPrefix(strings.ToLower(*s), "data:image/") && len(*s) <= maxDataURI {
+		if strings.HasPrefix(strings.ToLower(*s), "data:image/") && len(*s) <= maxDataURI && !activeSVG(*s) {
 			return s
 		}
 		return nil

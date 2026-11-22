@@ -30,7 +30,7 @@ services:
       SITEINFO_LOG_LEVEL: debug
       SITEINFO_REDIS_MODE: single
       SITEINFO_REDIS_ADDRS: redis:6379
-      SITEINFO_AUTH_TOKENS: ${SITEINFO_TOKEN:-dev-token-0123456789abcdef}
+      SITEINFO_AUTH_TOKENS: ${SITEINFO_TOKEN:-dev-only-token-change-me-0123456789abcdef}
       SITEINFO_FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:?copy .env.example to .env and set FIRECRAWL_API_KEY}
       SITEINFO_SERVER_SHUTDOWN_DELAY: 1s
       SITEINFO_DEBUG_ENABLED: "true"
@@ -47,4 +47,4 @@ services:
       - "127.0.0.1:8081:80"
     environment:
       API_UPSTREAM: http://siteinfo:8080
-      API_TOKEN: ${SITEINFO_TOKEN:-dev-token-0123456789abcdef}
+      API_TOKEN: ${SITEINFO_TOKEN:-dev-only-token-change-me-0123456789abcdef}

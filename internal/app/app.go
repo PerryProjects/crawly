@@ -16,13 +16,13 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/net/netutil"
 
-	"github.com/OWNER/siteinfo/internal/brand"
-	"github.com/OWNER/siteinfo/internal/cache"
-	"github.com/OWNER/siteinfo/internal/config"
-	"github.com/OWNER/siteinfo/internal/crawler"
-	"github.com/OWNER/siteinfo/internal/imprint"
-	"github.com/OWNER/siteinfo/internal/observability"
-	"github.com/OWNER/siteinfo/internal/server"
+	"github.com/perryprojects/siteinfo/internal/brand"
+	"github.com/perryprojects/siteinfo/internal/cache"
+	"github.com/perryprojects/siteinfo/internal/config"
+	"github.com/perryprojects/siteinfo/internal/crawler"
+	"github.com/perryprojects/siteinfo/internal/imprint"
+	"github.com/perryprojects/siteinfo/internal/observability"
+	"github.com/perryprojects/siteinfo/internal/server"
 )
 
 // Compile-time proof that both go-redis client types satisfy the interface the code uses.
@@ -76,6 +76,7 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 		crawler.WithMaxRetries(cfg.Firecrawl.MaxRetries),
 		crawler.WithBackoff(cfg.Firecrawl.BackoffBase),
 		crawler.WithLocation(cfg.Firecrawl.Country, cfg.Firecrawl.Languages),
+		crawler.WithStoreInCache(cfg.Firecrawl.StoreInCache),
 		crawler.WithLogger(log),
 		crawler.WithObserver(m),
 	)
@@ -102,29 +103,11 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 		server.WithHandlerTimeout(cfg.Server.HandlerTimeout),
 		server.WithRetryAfter(cfg.Server.RetryAfter),
 		server.WithRefresh(cfg.Cache.RefreshEnabled),
-		server.WithProtection(server.Protection{
-			IPRate: cfg.Protect.IPRate, IPBurst: cfg.Protect.IPBurst,
-			TokenRate: cfg.Protect.TokenRate, TokenBurst: cfg.Protect.TokenBurst,
-			AuthFailuresPerMinute: cfg.Protect.AuthFailuresPerMinute,
-			MaxInflight:           cfg.Protect.MaxInflightRequests,
-			MaxTrackedKeys:        cfg.Protect.MaxTrackedKeys,
-		}),
+		server.WithMaxInflight(cfg.Protect.MaxInflightRequests),
 	}
 	if cfg.Debug.Enabled {
 		sugar.Warn("DEBUG mode is enabled: per-request traces, cache flushing and config inspection are available; do not run this in production")
 		srvOpts = append(srvOpts, server.WithDebug(cfg.Describe()))
-	}
-	if len(cfg.Server.TrustedProxies) > 0 {
-		nets := make([]*net.IPNet, 0, len(cfg.Server.TrustedProxies))
-		for _, cidr := range cfg.Server.TrustedProxies {
-			_, n, err := net.ParseCIDR(cidr) // validated by config.Validate
-			if err != nil {
-				_ = rdb.Close()
-				return nil, fmt.Errorf("app: trusted proxy %q: %w", cidr, err)
-			}
-			nets = append(nets, n)
-		}
-		srvOpts = append(srvOpts, server.WithTrustedProxies(nets))
 	}
 	if !cfg.Auth.Enabled {
 		sugar.Warn("authentication is DISABLED; use this for local development only")

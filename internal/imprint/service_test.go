@@ -10,7 +10,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/OWNER/siteinfo/internal/crawler"
+	"github.com/perryprojects/siteinfo/internal/crawler"
 )
 
 // fakeSite serves canned pages and records every scrape request.

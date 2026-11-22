@@ -1,4 +1,4 @@
-module github.com/OWNER/siteinfo
+module github.com/perryprojects/siteinfo
 
 go 1.27
 

@@ -17,10 +17,10 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"go.uber.org/zap"
 
-	"github.com/OWNER/siteinfo/internal/cache"
-	"github.com/OWNER/siteinfo/internal/config"
-	"github.com/OWNER/siteinfo/internal/crawler"
-	"github.com/OWNER/siteinfo/internal/imprint"
+	"github.com/perryprojects/siteinfo/internal/cache"
+	"github.com/perryprojects/siteinfo/internal/config"
+	"github.com/perryprojects/siteinfo/internal/crawler"
+	"github.com/perryprojects/siteinfo/internal/imprint"
 )
 
 func TestClassify(t *testing.T) {
@@ -81,7 +81,7 @@ func testConfig(t *testing.T, redisAddr, firecrawlURL string) *config.Config {
 	cfg.Server.Addr = "127.0.0.1:0"
 	cfg.Otel.Exporter = "none"
 	cfg.Server.ShutdownDelay = 150 * time.Millisecond
-	cfg.Auth.Tokens = []string{"app-test-token-0123456789"}
+	cfg.Auth.Tokens = []string{"app-test-token-0123456789abcdef0123456789"}
 	cfg.Redis.Mode, cfg.Redis.Addrs = "single", []string{redisAddr}
 	cfg.Firecrawl.APIKey, cfg.Firecrawl.APIURL = "fc-test", firecrawlURL
 	cfg.Firecrawl.BackoffBase = time.Millisecond
@@ -124,7 +124,7 @@ func TestEndToEndAndGracefulShutdown(t *testing.T) {
 	go func() { runDone <- a.Run(ctx) }()
 
 	base := "http://" + a.APIAddr()
-	const tok = "app-test-token-0123456789"
+	const tok = "app-test-token-0123456789abcdef0123456789"
 	if code, _, _ := get(t, base+"/readyz", ""); code != 200 {
 		t.Fatalf("readyz = %d", code)
 	}
@@ -202,7 +202,7 @@ func TestServeAndCacheAcrossRequests(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- a.Run(ctx) }()
 
-	base, tok := "http://"+a.APIAddr(), "app-test-token-0123456789"
+	base, tok := "http://"+a.APIAddr(), "app-test-token-0123456789abcdef0123456789"
 	code, hdr, body := get(t, base+"/v1/imprint?url=acme.de", tok)
 	if code != 200 || hdr.Get("X-Cache") != "MISS" || body["cached"] != false {
 		t.Fatalf("first = %d %v %v", code, hdr, body)

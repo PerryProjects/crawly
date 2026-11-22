@@ -17,8 +17,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/OWNER/siteinfo/internal/crawler"
-	"github.com/OWNER/siteinfo/internal/observability"
+	"github.com/perryprojects/siteinfo/internal/crawler"
+	"github.com/perryprojects/siteinfo/internal/observability"
 )
 
 // Colors are the main brand colors as lowercase hex strings (#rrggbb or #rrggbbaa).

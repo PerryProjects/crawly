@@ -9,9 +9,9 @@ Scope: DACH websites (Germany, Austria, Switzerland). The upstream is [Firecrawl
 (official Go SDK), Redis is the only store and is used purely as a **cache plus distributed lock**. Nothing is
 persisted durably; the calling service stores results itself and owns customer overrides.
 
-> **The module path `github.com/OWNER/siteinfo` is a placeholder and must be renamed** (go.mod, all imports,
+> **The module path `github.com/perryprojects/siteinfo` is a placeholder and must be renamed** (go.mod, all imports,
 > Dockerfile/k8s image name): `go mod edit -module github.com/you/siteinfo` and a repo-wide search/replace of
-> `github.com/OWNER/siteinfo`.
+> `github.com/perryprojects/siteinfo`.
 
 ## Contents
 

@@ -18,7 +18,7 @@ import (
 	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 
-	"github.com/OWNER/siteinfo/internal/observability"
+	"github.com/perryprojects/siteinfo/internal/observability"
 )
 
 // Observer receives cache events. It is implemented by *observability.Metrics.

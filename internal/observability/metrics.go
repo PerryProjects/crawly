@@ -102,7 +102,7 @@ func NewMetrics(reader sdkmetric.Reader, serviceName string) (*Metrics, error) {
 		opts = append(opts, sdkmetric.WithReader(reader))
 	}
 	m := &Metrics{mp: sdkmetric.NewMeterProvider(opts...)}
-	meter := m.mp.Meter("github.com/OWNER/siteinfo")
+	meter := m.mp.Meter("github.com/perryprojects/siteinfo")
 
 	seconds := func(buckets ...float64) metric.Float64HistogramOption {
 		return metric.WithExplicitBucketBoundaries(buckets...)

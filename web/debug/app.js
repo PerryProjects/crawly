@@ -12,10 +12,7 @@ const HINTS = {
   host_not_found: 'Die Domain löst nicht auf (kein DNS-Eintrag). Tippfehler oder falsche Domain? Beispiel aus dem Test: juniperjack.de existiert nicht, juniperjack.com schon. Wird 5 Minuten gecacht.',
   upstream_unavailable: 'Firecrawl ist gestört (5xx, nicht erreichbar) oder lehnt das Konto ab (API-Key, Credits, Bedingungen). Kein Problem der Website; wird nicht gecacht. Siehe Server-Log.',
   upstream_rate_limited: 'Firecrawl hat mit 429 geantwortet (Konto-Limit). Wird nicht gecacht; später erneut versuchen.',
-  rate_limited: 'Pro-IP-Limit der API erreicht (protect.ip_rate). Retry-After beachten.',
-  token_rate_limited: 'Pro-Token-Limit der API erreicht (protect.token_rate).',
-  too_many_auth_failures: 'Zu viele fehlgeschlagene Anmeldungen von dieser IP. Prüfe, ob API_TOKEN des debug-ui-Containers zu SITEINFO_AUTH_TOKENS passt.',
-  overloaded: 'Lastschutz: zu viele gleichzeitige Requests oder Upstream-Loads in diesem Pod (protect.max_*).',
+  overloaded: 'Lastschutz: zu viele gleichzeitige Requests oder Upstream-Loads in diesem Pod (protect.*).',
   unavailable: 'Lock-Timeout, Redis nicht erreichbar oder der Dienst fährt herunter.',
   unauthorized: 'Der Proxy sendet einen Token, den die API ablehnt. API_TOKEN (debug-ui) muss in SITEINFO_AUTH_TOKENS stehen.',
   internal_error: 'Unerwarteter Fehler; Details stehen im Server-Log (Request-ID suchen).',
@@ -66,7 +63,7 @@ createApp({
     const enc = (s) => encodeURIComponent(s);
 
     async function flush() {
-      const res = await call('DELETE', `/api/v1/debug/cache?url=${enc(url.value)}`);
+      const res = await call('DELETE', `/api/v1/cache?url=${enc(url.value)}`);
       if (res.ok) toast(`Cache geleert (${res.json.deleted_keys} Schlüssel für ${res.json.host})`);
       else toast(`Cache leeren fehlgeschlagen: ${res.json?.error?.message || res.error || res.status}`);
       return res.ok;

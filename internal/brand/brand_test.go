@@ -2,6 +2,7 @@ package brand
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/url"
@@ -9,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/OWNER/siteinfo/internal/crawler"
+	"github.com/perryprojects/siteinfo/internal/crawler"
 )
 
 // fixture follows the branding shape shown in the Firecrawl docs cookbook.
@@ -182,5 +183,34 @@ func TestBrandPartialWhenUpstreamPartsAreMissing(t *testing.T) {
 	b, err = NewService(none).Lookup(context.Background(), "acme.de")
 	if err != nil || !b.PartialResult() || len(b.Warnings) != 2 || b.Warnings[0].Code != WarnBrandingUnavailable {
 		t.Fatalf("degraded result: %+v %v", b.Warnings, err)
+	}
+}
+
+func TestSVGDataURIsWithActiveContentAreDropped(t *testing.T) {
+	enc := func(svg string) string {
+		return "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString([]byte(svg))
+	}
+	tests := []struct {
+		name string
+		uri  string
+		keep bool
+	}{
+		{"plain svg (url-encoded)", "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20d%3D%22M0%200h1%22%2F%3E%3C%2Fsvg%3E", true},
+		{"plain svg (base64)", enc(`<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>`), true},
+		{"script element", enc(`<svg><script>alert(1)</script></svg>`), false},
+		{"event handler", "data:image/svg+xml;utf8,%3Csvg%20onload%3D%22alert(1)%22%3E%3C%2Fsvg%3E", false},
+		{"foreignObject", enc(`<svg><foreignObject><iframe src="x"/></foreignObject></svg>`), false},
+		{"javascript url", enc(`<svg><a href="javascript:alert(1)">x</a></svg>`), false},
+		{"broken base64", "data:image/svg+xml;base64,!!!", false},
+		{"png is not inspected", "data:image/png;base64,iVBORw0KGgo=", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			page := &crawler.Page{Branding: map[string]any{"images": map[string]any{"logo": tt.uri}}}
+			got := Map(page, baseURL()).Logo
+			if (got != nil) != tt.keep {
+				t.Fatalf("kept = %v, want %v", got != nil, tt.keep)
+			}
+		})
 	}
 }

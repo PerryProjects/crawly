@@ -8,20 +8,19 @@ import (
 	"time"
 )
 
-const testToken = "0123456789abcdef-token"
+const testToken = "0123456789abcdef0123456789abcdef-token"
 
 func TestLoadDefaultsAndEnv(t *testing.T) {
-	t.Setenv("SITEINFO_AUTH_TOKENS", testToken+", second-token-0123456789")
+	t.Setenv("SITEINFO_AUTH_TOKENS", testToken+", second-token-0123456789abcdef0123456789")
 	t.Setenv("SITEINFO_FIRECRAWL_API_KEY", "fc-test")
 	t.Setenv("SITEINFO_CACHE_TTL_IMPRINT_OK", "48h")
 	t.Setenv("SITEINFO_REDIS_MODE", "single")
 	t.Setenv("SITEINFO_REDIS_ADDRS", "redis:6379")
 	t.Setenv("SITEINFO_FIRECRAWL_MAX_CONCURRENCY", "7")
-	t.Setenv("SITEINFO_PROTECT_IP_RATE", "12.5")
+	t.Setenv("SITEINFO_PROTECT_LOAD_RATE", "12.5")
 	t.Setenv("SITEINFO_LOG_LEVEL", "warn")
 	t.Setenv("SITEINFO_FIRECRAWL_LANGUAGES", "de, en")
 	t.Setenv("SITEINFO_LOG_SAMPLING_THEREAFTER", "20")
-	t.Setenv("SITEINFO_SERVER_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.0.0/16")
 	t.Setenv("SITEINFO_OTEL_ENDPOINT", "http://collector:4318")
 
 	cfg, err := Load("")
@@ -34,7 +33,7 @@ func TestLoadDefaultsAndEnv(t *testing.T) {
 	if cfg.Cache.TTL.NotFound != 24*time.Hour {
 		t.Errorf("default not_found ttl lost: %s", cfg.Cache.TTL.NotFound)
 	}
-	if len(cfg.Auth.Tokens) != 2 || cfg.Auth.Tokens[1] != "second-token-0123456789" {
+	if len(cfg.Auth.Tokens) != 2 || cfg.Auth.Tokens[1] != "second-token-0123456789abcdef0123456789" {
 		t.Errorf("tokens = %q", cfg.Auth.Tokens)
 	}
 	if cfg.Redis.Mode != "single" || cfg.Redis.Addrs[0] != "redis:6379" {
@@ -49,11 +48,8 @@ func TestLoadDefaultsAndEnv(t *testing.T) {
 	if cfg.Log.Level != "warn" || cfg.Log.SamplingInitial != 100 || cfg.Log.SamplingThereafter != 20 {
 		t.Errorf("log = %+v", cfg.Log)
 	}
-	if cfg.Protect.IPRate != 12.5 || cfg.Protect.IPBurst != 100 {
+	if cfg.Protect.LoadRate != 12.5 || cfg.Protect.LoadBurst != 10 {
 		t.Errorf("protect = %+v", cfg.Protect)
-	}
-	if len(cfg.Server.TrustedProxies) != 2 || cfg.Server.TrustedProxies[1] != "192.168.0.0/16" {
-		t.Errorf("trusted proxies = %q", cfg.Server.TrustedProxies)
 	}
 	if cfg.Otel.Endpoint != "http://collector:4318" || cfg.Otel.Exporter != "otlp" {
 		t.Errorf("otel = %+v", cfg.Otel)
@@ -109,12 +105,9 @@ func TestValidate(t *testing.T) {
 		{"sampling needs thereafter", func(c *Config) { c.Log.SamplingThereafter = 0 }, "sampling_thereafter"},
 		{"country off", func(c *Config) { c.Firecrawl.Country = "" }, ""},
 		{"bad country", func(c *Config) { c.Firecrawl.Country = "de" }, "firecrawl.country"},
-		{"bad cidr", func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/8", "nope"} }, "trusted_proxies"},
-		{"good cidr", func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/8", "fd00::/8"} }, ""},
-		{"burst missing", func(c *Config) { c.Protect.IPRate, c.Protect.IPBurst = 5, 0 }, "ip_burst"},
-		{"rate disabled needs no burst", func(c *Config) { c.Protect.IPRate, c.Protect.IPBurst = 0, 0 }, ""},
+		{"burst missing", func(c *Config) { c.Protect.LoadRate, c.Protect.LoadBurst = 5, 0 }, "load_burst"},
+		{"rate disabled needs no burst", func(c *Config) { c.Protect.LoadRate, c.Protect.LoadBurst = 0, 0 }, ""},
 		{"negative limit", func(c *Config) { c.Protect.MaxInflightRequests = -1 }, "max_inflight_requests"},
-		{"tiny key table", func(c *Config) { c.Protect.MaxTrackedKeys = 10 }, "max_tracked_keys"},
 		{"bad exporter", func(c *Config) { c.Otel.Exporter = "prometheus" }, "otel.exporter"},
 		{"bad otel endpoint", func(c *Config) { c.Otel.Endpoint = "collector:4318" }, "otel.endpoint"},
 		{"good otel endpoint", func(c *Config) { c.Otel.Endpoint = "http://collector:4318" }, ""},

@@ -14,8 +14,8 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/net/publicsuffix"
 
-	"github.com/OWNER/siteinfo/internal/crawler"
-	"github.com/OWNER/siteinfo/internal/observability"
+	"github.com/perryprojects/siteinfo/internal/crawler"
+	"github.com/perryprojects/siteinfo/internal/observability"
 )
 
 // fallbackPaths are probed (at most these three) when the homepage links no imprint.
