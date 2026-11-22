@@ -27,7 +27,9 @@ var (
 
 	// A register type glued to the number ("HRB 104144", "FN123456a"), a common LLM habit.
 	// Spaced spellings occur too ("HR B 59603", seen live).
-	reRegPrefixed = regexp.MustCompile(`(?i)^(H\s?R\s?A|H\s?R\s?B|G\s?n\s?R|P\s?R|V\s?R|F\s?N)[.:\s]*(\d.*)$`)
+	// Also "HRB-Nr. 730623" (seen live on porsche.com).
+	reRegPrefixed = regexp.MustCompile(`(?i)^(H\s?R\s?A|H\s?R\s?B|G\s?n\s?R|P\s?R|V\s?R|F\s?N)[-.:\s]*(?:Nr\.?)?[.:\s]*(\d.*)$`)
+	reMailto      = regexp.MustCompile(`(?i)mailto:([^)\s?"'>]+)`)
 	// Separators between several VAT IDs in one field ("DE 326114858, CHE-276.969.644", seen live).
 	reVATSplit = regexp.MustCompile(`(?i)\s*(?:[,;/|]|\bund\b|\band\b)\s*`)
 
@@ -96,7 +98,7 @@ func Validate(f *Fields, text string) []Warning {
 	} else if !grounded(text, *f.CompanyName) {
 		warn(WarnUnverified, "company_name", "company_name not found verbatim in the imprint text")
 	}
-	if f.Address == nil {
+	if f.Address == nil || f.Address.Street == nil && f.Address.PostalCode == nil && f.Address.City == nil {
 		warn(WarnMissing, "address", "postal address not found")
 	}
 
@@ -123,6 +125,17 @@ func Validate(f *Fields, text string) []Warning {
 		dropUngrounded(text, "contact.phone", &f.Contact.Phone, warn)
 		dropUngrounded(text, "contact.fax", &f.Contact.Fax, warn)
 		f.Contact = nonEmpty(f.Contact)
+	}
+	// Cloudflare hides addresses as "[email protected]" (seen live on blackroll.com) while the page still
+	// carries the mailto link. With no usable address, take it when the page links exactly one.
+	if f.Contact == nil || f.Contact.Email == nil {
+		if addr, ok := onlyMailto(text); ok {
+			if f.Contact == nil {
+				f.Contact = &Contact{}
+			}
+			f.Contact.Email = &addr
+			warn(WarnNormalized, "contact.email", "contact.email taken from the only mailto link on the page")
+		}
 	}
 	if f.Address != nil && f.Address.PostalCode != nil {
 		pc := *f.Address.PostalCode
@@ -337,6 +350,22 @@ var legalForms = func() map[string]string {
 	}
 	return m
 }()
+
+// onlyMailto returns the address when the text links exactly one distinct, valid mailto address.
+func onlyMailto(text string) (string, bool) {
+	var found string
+	for _, m := range reMailto.FindAllStringSubmatch(text, -1) {
+		a := strings.ToLower(m[1])
+		if !validEmail(a) {
+			continue
+		}
+		if found != "" && found != a {
+			return "", false
+		}
+		found = a
+	}
+	return found, found != ""
+}
 
 // validEmail accepts exactly one plain address (no display name) with a dotted domain.
 func validEmail(s string) bool {

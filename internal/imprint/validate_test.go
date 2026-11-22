@@ -36,7 +36,7 @@ func TestValidateVAT(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := &Fields{CompanyName: s("ACME"), Address: &Address{}, VATID: s(tt.vat)}
+			f := &Fields{CompanyName: s("ACME"), Address: &Address{City: s("Berlin")}, VATID: s(tt.vat)}
 			if tt.country != "" {
 				f.Country = s(tt.country)
 			}
@@ -92,7 +92,7 @@ func TestValidateRegister(t *testing.T) {
 			if tt.typ != "" {
 				r.Type = s(tt.typ)
 			}
-			f := &Fields{CompanyName: s("ACME"), Address: &Address{}, Country: s(tt.country), Register: r}
+			f := &Fields{CompanyName: s("ACME"), Address: &Address{City: s("Berlin")}, Country: s(tt.country), Register: r}
 			ws := Validate(f, "")
 			if tt.wantTyp != "" && (f.Register.Type == nil || *f.Register.Type != tt.wantTyp) {
 				t.Errorf("type = %v, want %s", f.Register.Type, tt.wantTyp)
@@ -247,7 +247,7 @@ func TestEmailDeobfuscation(t *testing.T) {
 		{"nothing here", "info [at] acme.de", "", WarnUnverifiedRemoved}, // grounding uses the value as written
 	}
 	for _, tt := range tests {
-		f := &Fields{CompanyName: s("ACME"), Address: &Address{}, Contact: &Contact{Email: s(tt.extracted)}}
+		f := &Fields{CompanyName: s("ACME"), Address: &Address{City: s("Berlin")}, Contact: &Contact{Email: s(tt.extracted)}}
 		ws := Validate(f, "ACME "+tt.page)
 		var got string
 		if f.Contact != nil && f.Contact.Email != nil {
@@ -267,7 +267,7 @@ func TestLegalFormCasing(t *testing.T) {
 		"gmbh": "GmbH", "GMBH & CO. KG": "GmbH & Co. KG", "ug (haftungsbeschränkt)": "UG (haftungsbeschränkt)",
 		"e.k.": "e.K.", "GmbH": "GmbH", "Ltd.": "Ltd.", "Gesellschaft mit beschränkter Haftung": "Gesellschaft mit beschränkter Haftung",
 	} {
-		f := &Fields{CompanyName: s("x"), Address: &Address{}, LegalForm: s(in)}
+		f := &Fields{CompanyName: s("x"), Address: &Address{City: s("Berlin")}, LegalForm: s(in)}
 		Validate(f, "")
 		if *f.LegalForm != want {
 			t.Errorf("legal form %q -> %q, want %q", in, *f.LegalForm, want)
@@ -277,24 +277,24 @@ func TestLegalFormCasing(t *testing.T) {
 
 func TestRealWorldIdentifierSpellings(t *testing.T) {
 	// got-bag.com: two VAT IDs in one line.
-	f := &Fields{CompanyName: s("GOT BAG GmbH"), Address: &Address{}, Country: s("DE"), VATID: s("DE 326114858, CHE-276.969.644")}
+	f := &Fields{CompanyName: s("GOT BAG GmbH"), Address: &Address{City: s("Berlin")}, Country: s("DE"), VATID: s("DE 326114858, CHE-276.969.644")}
 	ws := Validate(f, "GOT BAG GmbH USt-IdNr.: DE 326114858, CHE-276.969.644")
 	if f.VATID == nil || *f.VATID != "DE326114858" || len(f.OtherVATIDs) != 1 || f.OtherVATIDs[0] != "CHE-276.969.644" || !hasWarning(ws, WarnNormalized) {
 		t.Fatalf("multi VAT: vat=%v others=%v ws=%+v", f.VATID, f.OtherVATIDs, ws)
 	}
 	// armedangels.com: "HR B 59603".
-	f = &Fields{CompanyName: s("x"), Address: &Address{}, Country: s("DE"), Register: &Register{Type: s("HRB"), Number: s("HR B 59603")}}
+	f = &Fields{CompanyName: s("x"), Address: &Address{City: s("Berlin")}, Country: s("DE"), Register: &Register{Type: s("HRB"), Number: s("HR B 59603")}}
 	if ws := Validate(f, "x HR B 59603"); len(ws) != 0 || *f.Register.Number != "59603" || *f.Register.Type != "HRB" {
 		t.Fatalf("spaced register: %+v %+v", f.Register, ws)
 	}
 	// giesswein.com: "Firmenbuchnummer: 42354k" without a type.
-	f = &Fields{CompanyName: s("x"), Address: &Address{}, Country: s("AT"), Register: &Register{Number: s("42354k")}}
+	f = &Fields{CompanyName: s("x"), Address: &Address{City: s("Berlin")}, Country: s("AT"), Register: &Register{Number: s("42354k")}}
 	ws = Validate(f, "x Firmenbuchnummer: 42354k")
 	if f.Register.Type == nil || *f.Register.Type != "FN" || hasWarning(ws, "without register.type") {
 		t.Fatalf("firmenbuch: %+v %+v", f.Register, ws)
 	}
 	// Without the word Firmenbuch on the page nothing is inferred.
-	f = &Fields{CompanyName: s("x"), Address: &Address{}, Country: s("AT"), Register: &Register{Number: s("42354k")}}
+	f = &Fields{CompanyName: s("x"), Address: &Address{City: s("Berlin")}, Country: s("AT"), Register: &Register{Number: s("42354k")}}
 	Validate(f, "x Registernummer 42354k")
 	if f.Register.Type != nil {
 		t.Fatal("type must not be guessed")
@@ -311,19 +311,45 @@ func TestSwissUIDAsRegister(t *testing.T) {
 }
 
 func TestRegisterTypeFromPageText(t *testing.T) {
-	f := &Fields{CompanyName: s("Bergfreunde GmbH"), Address: &Address{}, Country: s("DE"), Register: &Register{Type: s("HR"), Number: s("382746")}}
+	f := &Fields{CompanyName: s("Bergfreunde GmbH"), Address: &Address{City: s("Berlin")}, Country: s("DE"), Register: &Register{Type: s("HR"), Number: s("382746")}}
 	ws := Validate(f, "Bergfreunde GmbH Handelsregisternummer: HR Amtsgericht Stuttgart Registernummer: HRB 382746")
 	if *f.Register.Type != "HRB" || !hasWarning(ws, WarnNormalized) || hasWarning(ws, WarnInvalidFormat) {
 		t.Fatalf("register=%+v ws=%+v", f.Register, ws)
 	}
-	f = &Fields{CompanyName: s("dm"), Address: &Address{}, Country: s("DE"), Register: &Register{Type: s("HRA"), Number: s("HR A 102711")}}
+	f = &Fields{CompanyName: s("dm"), Address: &Address{City: s("Berlin")}, Country: s("DE"), Register: &Register{Type: s("HRA"), Number: s("HR A 102711")}}
 	if ws := Validate(f, "dm Registergericht Mannheim HR A 102711"); len(ws) != 0 || *f.Register.Number != "102711" {
 		t.Fatalf("dm: register=%+v ws=%+v", f.Register, ws)
 	}
 	// The number must stand right after the type: no guessing from other numbers on the page.
-	f = &Fields{CompanyName: s("x"), Address: &Address{}, Country: s("DE"), Register: &Register{Number: s("123")}}
+	f = &Fields{CompanyName: s("x"), Address: &Address{City: s("Berlin")}, Country: s("DE"), Register: &Register{Number: s("123")}}
 	Validate(f, "x HRB 999 and later 123")
 	if f.Register.Type != nil {
 		t.Fatalf("type guessed: %+v", f.Register)
+	}
+}
+
+func TestLiveSpellingsRound2(t *testing.T) {
+	// porsche.com: "HRB-Nr. 730623".
+	f := &Fields{CompanyName: s("Porsche AG"), Address: &Address{City: s("Berlin")}, Country: s("DE"), Register: &Register{Type: s("HRB"), Number: s("HRB-Nr. 730623")}}
+	if ws := Validate(f, "Porsche AG Registergericht: Amtsgericht Stuttgart HRB-Nr. 730623"); hasWarning(ws, WarnInvalidFormat) || *f.Register.Number != "730623" {
+		t.Fatalf("porsche: %+v %+v", f.Register, ws)
+	}
+	// blackroll.com: Cloudflare placeholder, one mailto link on the page.
+	text := "BLACKROLL AG Email: [shop.de@blackroll.com](mailto:shop.de@blackroll.com) Website"
+	f = &Fields{CompanyName: s("BLACKROLL AG"), Address: &Address{City: s("Berlin")}, Contact: &Contact{Email: s("[email protected]")}}
+	Validate(f, text+" [email protected]")
+	if f.Contact == nil || f.Contact.Email == nil || *f.Contact.Email != "shop.de@blackroll.com" {
+		t.Fatalf("blackroll: %+v", f.Contact)
+	}
+	// Two different mailto addresses: nothing is picked.
+	f = &Fields{CompanyName: s("x"), Address: &Address{City: s("Berlin")}}
+	Validate(f, "x [a](mailto:a@x.de) [b](mailto:b@x.de)")
+	if f.Contact != nil {
+		t.Fatalf("ambiguous mailto picked: %+v", f.Contact)
+	}
+	// oebb.at / bosch.com: an address object with only a country is a missing address.
+	f = &Fields{CompanyName: s("x"), Address: &Address{Country: s("AT")}}
+	if ws := Validate(f, "x"); !hasWarning(ws, "postal address not found") {
+		t.Fatalf("country-only address: %+v", ws)
 	}
 }
