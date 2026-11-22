@@ -26,7 +26,7 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			log, err := observability.NewLogger(cfg.Env, cfg.LogLevel)
+			log, err := observability.NewLogger(cfg.Env, cfg.Log.Level, observability.Sampling{Initial: cfg.Log.SamplingInitial, Thereafter: cfg.Log.SamplingThereafter})
 			if err != nil {
 				return err
 			}

@@ -18,6 +18,8 @@ func TestLoadDefaultsAndEnv(t *testing.T) {
 	t.Setenv("SITEINFO_REDIS_ADDRS", "redis:6379")
 	t.Setenv("SITEINFO_FIRECRAWL_MAX_CONCURRENCY", "7")
 	t.Setenv("SITEINFO_PROTECT_IP_RATE", "12.5")
+	t.Setenv("SITEINFO_LOG_LEVEL", "warn")
+	t.Setenv("SITEINFO_LOG_SAMPLING_THEREAFTER", "20")
 	t.Setenv("SITEINFO_SERVER_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.0.0/16")
 	t.Setenv("SITEINFO_OTEL_ENDPOINT", "http://collector:4318")
 
@@ -39,6 +41,9 @@ func TestLoadDefaultsAndEnv(t *testing.T) {
 	}
 	if cfg.Firecrawl.MaxConcurrency != 7 {
 		t.Errorf("max concurrency = %d", cfg.Firecrawl.MaxConcurrency)
+	}
+	if cfg.Log.Level != "warn" || cfg.Log.SamplingInitial != 100 || cfg.Log.SamplingThereafter != 20 {
+		t.Errorf("log = %+v", cfg.Log)
 	}
 	if cfg.Protect.IPRate != 12.5 || cfg.Protect.IPBurst != 100 {
 		t.Errorf("protect = %+v", cfg.Protect)
@@ -95,6 +100,8 @@ func TestValidate(t *testing.T) {
 		{"zero ttl", func(c *Config) { c.Cache.TTL.Error = 0 }, "cache.ttl.error"},
 		{"no api key for cloud", func(c *Config) { c.Firecrawl.APIKey = "" }, "firecrawl.api_key"},
 		{"no api key for self-hosted", func(c *Config) { c.Firecrawl.APIKey = ""; c.Firecrawl.APIURL = "http://fc:3002" }, ""},
+		{"sampling off", func(c *Config) { c.Log.SamplingInitial, c.Log.SamplingThereafter = 0, 0 }, ""},
+		{"sampling needs thereafter", func(c *Config) { c.Log.SamplingThereafter = 0 }, "sampling_thereafter"},
 		{"bad cidr", func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/8", "nope"} }, "trusted_proxies"},
 		{"good cidr", func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/8", "fd00::/8"} }, ""},
 		{"burst missing", func(c *Config) { c.Protect.IPRate, c.Protect.IPBurst = 5, 0 }, "ip_burst"},

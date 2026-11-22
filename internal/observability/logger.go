@@ -12,18 +12,26 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+// Sampling bounds log volume in production: within one second the first Initial entries with
+// the same level and message pass, after that only every Thereafter-th. Initial 0 disables it.
+type Sampling struct {
+	Initial    int
+	Thereafter int
+}
+
 // NewLogger builds a zap logger on stderr: JSON in production, colored console in dev.
-func NewLogger(env, level string) (*zap.Logger, error) {
-	return NewLoggerTo(env, level, os.Stderr)
+func NewLogger(env, level string, s Sampling) (*zap.Logger, error) {
+	return NewLoggerTo(env, level, s, os.Stderr)
 }
 
 // NewLoggerTo is NewLogger with an explicit destination (used by tests and benchmarks).
 //
-// Logging policy (enforced by the forbidigo lint rule): typed zap fields only, never
-// zap.Any / zap.Reflect / the Sugar API, because those use reflection and allocate.
-// Structs are logged by implementing zapcore.ObjectMarshaler and passing them with
-// zap.Inline, which encodes them field by field without reflection or allocation.
-func NewLoggerTo(env, level string, w io.Writer) (*zap.Logger, error) {
+// Logging policy: hot paths (the access log) use typed fields and zapcore.ObjectMarshaler
+// structs passed with zap.Inline, which encode without reflection and without allocating.
+// Everywhere else the Sugared logger and zap.Any are fine; only global loggers are banned
+// (forbidigo). Marshalers are also the place to keep personal data out of logs: leave such
+// fields out of MarshalLogObject.
+func NewLoggerTo(env, level string, s Sampling, w io.Writer) (*zap.Logger, error) {
 	var lvl zapcore.Level
 	if err := lvl.UnmarshalText([]byte(level)); err != nil {
 		return nil, fmt.Errorf("observability: log level %q: %w", level, err)
@@ -37,9 +45,10 @@ func NewLoggerTo(env, level string, w io.Writer) (*zap.Logger, error) {
 		enc = zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig())
 	}
 	core := zapcore.NewCore(enc, zapcore.AddSync(w), lvl)
-	if env != "dev" {
-		// Same defaults as zap's production config: bounded log volume under floods.
-		core = zapcore.NewSamplerWithOptions(core, time.Second, 100, 100)
+	if env != "dev" && s.Initial > 0 {
+		// Bounded log volume under floods: e.g. after 100 identical messages in one second only
+		// every 50th is let through until the next second starts.
+		core = zapcore.NewSamplerWithOptions(core, time.Second, s.Initial, max(s.Thereafter, 1))
 	}
 	opts := []zap.Option{zap.ErrorOutput(zapcore.AddSync(os.Stderr))}
 	if env == "dev" {

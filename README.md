@@ -229,7 +229,8 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | Key | Env | Default | Notes |
 |---|---|---|---|
 | `env` | `SITEINFO_ENV` | `production` | `dev` = console logs, `production` = JSON logs |
-| `log_level` | `SITEINFO_LOG_LEVEL` | `info` | zap level |
+| `log.level` | `SITEINFO_LOG_LEVEL` | `info` | zap level |
+| `log.sampling_initial` / `log.sampling_thereafter` | `SITEINFO_LOG_SAMPLING_INITIAL` / `…_THEREAFTER` | `100` / `50` | production only: within one second the first 100 entries with the same level and message pass, then every 50th; initial `0` = off |
 | `server.addr` | `SITEINFO_SERVER_ADDR` | `:8080` | API |
 | `server.read_header_timeout` | `…_READ_HEADER_TIMEOUT` | `5s` | |
 | `server.read_timeout` | `…_READ_TIMEOUT` | `10s` | |
@@ -326,15 +327,20 @@ Details that matter:
   `http.server.request.duration` (s; `http.route`, `http.request.method`, `http.response.status_code`, the OTel
   semantic-convention name) and the Go runtime metrics (`go.*`). Export errors are logged as warnings.
   Only metrics are implemented; traces are not.
-- **Logging policy: zap with zero-allocation encoding on the hot path.** Only typed fields are used; `zap.Any`,
-  `zap.Reflect`, `Sugar()` and global loggers are banned by the `forbidigo` lint rule (they use reflection and
-  allocate). Structs are logged by implementing `zapcore.ObjectMarshaler` and passing them with `zap.Inline`
-  (`observability.RequestFields`, the access-log record). Request-scoped fields (`request_id`, `host`, `kind`) travel in
-  the context and are attached per call instead of building a child logger per request. The access log record and its
-  variadic field slice are pooled; `TestAccessLogDoesNotAllocate` and `BenchmarkAccessLog` assert and show **0 allocs/op**
-  (~0.6 µs/op on the dev machine). Production disables caller capture (it allocates; dev keeps it) and samples
-  (100 identical messages/s, then every 100th) to bound log volume under floods. Honest scope: this covers the log calls;
-  the request itself still allocates (context, request-fields struct, OTel attribute sets).
+- **Logging policy.** The hot path (the access log) is zero-allocation: structs are logged by implementing
+  `zapcore.ObjectMarshaler` and passing them with `zap.Inline` (`observability.RequestFields`, the access-log record).
+  Request-scoped fields (`request_id`, `host`, `kind`) travel in the context and are attached per call instead of
+  building a child logger per request. The access log record and its variadic field slice are pooled;
+  `TestAccessLogDoesNotAllocate` and `BenchmarkAccessLog` assert and show **0 allocs/op** (~0.6 µs/op on the dev
+  machine). Everywhere else performance does not matter: the Sugared logger and `zap.Any` are allowed (only global
+  loggers are banned by the `forbidigo` lint rule). Honest scope: the zero-alloc claim covers the access-log call; the
+  request itself still allocates (context, request-fields struct, OTel attribute sets).
+- **Marshalers keep personal data out of logs.** `MarshalLogObject` decides what a struct reveals. `imprint.Imprint`
+  implements it and logs only the imprint URL, country, warning count and text length, never name, address, e-mail or
+  phone (a test enforces this), so even an accidental `zap.Object("imprint", imp)` leaks nothing.
+- **Sampling** (production only, `log.sampling_*`): within one second the first 100 entries with the same level and
+  message pass, then only every 50th, until the next second. Production also disables caller capture (it allocates;
+  dev keeps it).
 - Logs never contain the query string, the `Authorization` header or Firecrawl payloads; error details from
   upstream/Redis are logged, not returned to clients.
 

@@ -17,15 +17,15 @@ import (
 )
 
 func TestNewLogger(t *testing.T) {
-	if _, err := NewLogger("dev", "loud"); err == nil {
+	if _, err := NewLogger("dev", "loud", Sampling{}); err == nil {
 		t.Fatal("invalid level must fail")
 	}
 	var prod, dev bytes.Buffer
-	pl, err := NewLoggerTo("production", "info", &prod)
+	pl, err := NewLoggerTo("production", "info", Sampling{}, &prod)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dl, err := NewLoggerTo("dev", "debug", &dev)
+	dl, err := NewLoggerTo("dev", "debug", Sampling{}, &dev)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,9 +43,35 @@ func TestNewLogger(t *testing.T) {
 	}
 }
 
+func TestProductionSampling(t *testing.T) {
+	count := func(env string, s Sampling) int {
+		var buf bytes.Buffer
+		l, err := NewLoggerTo(env, "info", s, &buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 1000 { // identical message, far faster than one second
+			l.Info("flood")
+		}
+		l.Info("different message is sampled separately")
+		return strings.Count(buf.String(), "\n")
+	}
+	// 100 pass, then every 50th: 100 + 900/50 = 118 (+1 other message). A second boundary can
+	// reset the window, which only lets more through, so assert bounds instead of an exact count.
+	if n := count("production", Sampling{Initial: 100, Thereafter: 50}); n < 101 || n > 250 {
+		t.Errorf("sampled production lines = %d, want about 119", n)
+	}
+	if n := count("production", Sampling{}); n != 1001 {
+		t.Errorf("sampling disabled: lines = %d, want 1001", n)
+	}
+	if n := count("dev", Sampling{Initial: 100, Thereafter: 50}); n != 1001 {
+		t.Errorf("dev must never sample: lines = %d", n)
+	}
+}
+
 func TestRequestFields(t *testing.T) {
 	var buf bytes.Buffer
-	l, _ := NewLoggerTo("production", "info", &buf)
+	l, _ := NewLoggerTo("production", "info", Sampling{}, &buf)
 
 	l.Info("no fields", Fields(context.Background()))
 	ctx := WithRequestFields(context.Background(), &RequestFields{RequestID: "r1"})

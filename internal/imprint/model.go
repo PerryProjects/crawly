@@ -5,7 +5,11 @@
 // page markdown, is the legally authoritative part of every result.
 package imprint
 
-import "errors"
+import (
+	"errors"
+
+	"go.uber.org/zap/zapcore"
+)
 
 // ErrNotFound means no imprint page could be located. It is a normal,
 // negative-cacheable outcome, not a failure.
@@ -56,4 +60,17 @@ type Imprint struct {
 	Text string `json:"text"`
 	// Warnings lists failed deterministic checks and caveats. Never nil in output.
 	Warnings []string `json:"warnings"`
+}
+
+// MarshalLogObject implements zapcore.ObjectMarshaler. It deliberately leaves out every
+// personal or identifying field (names, address, e-mail, phone, IDs) and the page text:
+// imprints of sole proprietors are personal data and must not end up in logs.
+func (i *Imprint) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("imprint_url", i.ImprintURL)
+	if i.Country != nil {
+		enc.AddString("country", *i.Country)
+	}
+	enc.AddInt("warnings", len(i.Warnings))
+	enc.AddInt("text_len", len(i.Text))
+	return nil
 }

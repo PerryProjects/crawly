@@ -21,7 +21,7 @@ const envPrefix = "SITEINFO"
 // Config is the complete, typed service configuration.
 type Config struct {
 	Env       string          `mapstructure:"env"` // "dev" or "production"
-	LogLevel  string          `mapstructure:"log_level"`
+	Log       LogConfig       `mapstructure:"log"`
 	Server    ServerConfig    `mapstructure:"server"`
 	Auth      AuthConfig      `mapstructure:"auth"`
 	Redis     RedisConfig     `mapstructure:"redis"`
@@ -29,6 +29,15 @@ type Config struct {
 	Cache     CacheConfig     `mapstructure:"cache"`
 	Protect   ProtectConfig   `mapstructure:"protect"`
 	Otel      OtelConfig      `mapstructure:"otel"`
+}
+
+// LogConfig configures logging. Sampling applies in production only: within one second the
+// first SamplingInitial entries with the same level and message are logged, after that only
+// every SamplingThereafter-th. SamplingInitial 0 disables sampling.
+type LogConfig struct {
+	Level              string `mapstructure:"level"`
+	SamplingInitial    int    `mapstructure:"sampling_initial"`
+	SamplingThereafter int    `mapstructure:"sampling_thereafter"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -132,8 +141,8 @@ func (c CacheConfig) LockExpiry() time.Duration { return c.LoadTimeout + c.LockM
 // Default returns the configuration used when nothing else is set.
 func Default() Config {
 	return Config{
-		Env:      "production",
-		LogLevel: "info",
+		Env: "production",
+		Log: LogConfig{Level: "info", SamplingInitial: 100, SamplingThereafter: 50},
 		Server: ServerConfig{
 			Addr:              ":8080",
 			ReadHeaderTimeout: 5 * time.Second,
@@ -258,6 +267,9 @@ func (c *Config) Validate() error {
 
 	if c.Env != "dev" && c.Env != "production" {
 		add("env must be dev or production, got %q", c.Env)
+	}
+	if c.Log.SamplingInitial < 0 || (c.Log.SamplingInitial > 0 && c.Log.SamplingThereafter < 1) {
+		add("log.sampling_initial must be >= 0 and log.sampling_thereafter >= 1 when sampling is on")
 	}
 	if c.Server.Addr == "" {
 		add("server.addr is required")

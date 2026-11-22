@@ -5,7 +5,8 @@
 # This file is the LOCAL DEV setup (make run): single-node Redis, auth disabled,
 # self-hosted Firecrawl or the keyless free tier. Never use it as is in production.
 env: dev
-log_level: debug
+log:
+  level: debug
 
 server:
   addr: ":8080"
