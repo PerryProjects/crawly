@@ -47,28 +47,6 @@ func TestKeyedLimiter(t *testing.T) {
 	}
 }
 
-func TestKeyedLimiterCheckDoesNotConsume(t *testing.T) {
-	t0 := time.Unix(1_700_000_000, 0)
-	l := newKeyedLimiter(1.0/6, 2, 1000)
-	if ok, _ := l.check("ip", t0); !ok {
-		t.Fatal("unknown key has budget")
-	}
-	l.take("ip", t0)
-	l.take("ip", t0)
-	for range 5 {
-		if ok, _ := l.check("ip", t0); ok {
-			t.Fatal("exhausted bucket must report no budget")
-		}
-	}
-	ok, wait := l.check("ip", t0)
-	if ok || wait < 5*time.Second || wait > 7*time.Second {
-		t.Fatalf("wait = %s, want ~6s", wait)
-	}
-	if ok, _ := l.check("ip", t0.Add(7*time.Second)); !ok {
-		t.Fatal("budget must return after refill")
-	}
-}
-
 func TestKeyedLimiterMemoryIsBounded(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0)
 	l := newKeyedLimiter(1, 1, 1000)
@@ -219,13 +197,18 @@ func TestAuthFailureBlocking(t *testing.T) {
 			t.Fatalf("attempt %d = %d", i, rec.Code)
 		}
 	}
-	// Brute-force protection: even the correct token is refused until the block expires.
-	rec := doFrom(t, s, "198.51.100.1:1", lookupURL, nil)
+	// Further failures from that IP are throttled ...
+	rec := doFrom(t, s, "198.51.100.1:1", lookupURL, bad)
 	if rec.Code != 429 || errCode(t, rec) != "too_many_auth_failures" || rec.Header().Get("Retry-After") == "" {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
 	}
-	if rec := doFrom(t, s, "198.51.100.2:1", lookupURL, nil); rec.Code != 200 {
-		t.Fatalf("other IPs are unaffected: %d", rec.Code)
+	// ... but a valid token from the same IP still works: behind a proxy all callers share that IP,
+	// and an attacker must not be able to lock everyone out.
+	if rec := doFrom(t, s, "198.51.100.1:1", lookupURL, nil); rec.Code != 200 {
+		t.Fatalf("valid token was locked out: %d", rec.Code)
+	}
+	if rec := doFrom(t, s, "198.51.100.2:1", lookupURL, bad); rec.Code != 401 {
+		t.Fatalf("other IPs have their own budget: %d", rec.Code)
 	}
 	found := false
 	for _, r := range obs.rejected {

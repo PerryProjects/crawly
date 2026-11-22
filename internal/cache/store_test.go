@@ -423,13 +423,30 @@ func TestFailedRefreshKeepsGoodEntry(t *testing.T) {
 	if _, err := s.Load(ctx, testKey, okFetch(&calls, nil), LoadOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.Load(ctx, testKey, func(context.Context) (Fetched, error) { return Fetched{}, errUpstream }, LoadOptions{Refresh: true})
-	if !errors.Is(err, errUpstream) {
-		t.Fatalf("err = %v", err)
+	worse := map[string]FetchFunc{
+		"error":     func(context.Context) (Fetched, error) { return Fetched{}, errUpstream },
+		"not_found": func(context.Context) (Fetched, error) { return Fetched{}, errGone },
+		"partial": func(context.Context) (Fetched, error) {
+			return Fetched{Data: json.RawMessage(`{"v":2}`), Partial: true}, nil
+		},
+		"transient": func(context.Context) (Fetched, error) { return Fetched{}, errors.New("transient") },
+	}
+	for name, fetch := range worse {
+		e.mr.Del(testKey.Cooldown())
+		entry, err := s.Load(ctx, testKey, fetch, LoadOptions{Refresh: true})
+		if err != nil || !entry.RefreshKept || !entry.Cached || string(entry.Data) != `{"v":1}` {
+			t.Fatalf("%s refresh: the previous complete entry must be served: %+v %v", name, entry, err)
+		}
 	}
 	entry, err := s.Load(ctx, testKey, okFetch(&calls, nil), LoadOptions{})
-	if err != nil || entry.Status != StatusOK || !entry.Cached {
+	if err != nil || entry.Status != StatusOK || !entry.Cached || string(entry.Data) != `{"v":1}` {
 		t.Fatalf("good entry was overwritten: %+v %v", entry, err)
+	}
+	// A better refresh result does replace it.
+	e.mr.Del(testKey.Cooldown())
+	better := func(context.Context) (Fetched, error) { return Fetched{Data: json.RawMessage(`{"v":3}`)}, nil }
+	if entry, err = s.Load(ctx, testKey, better, LoadOptions{Refresh: true}); err != nil || entry.RefreshKept || string(entry.Data) != `{"v":3}` {
+		t.Fatalf("complete refresh result: %+v %v", entry, err)
 	}
 }
 
@@ -537,10 +554,11 @@ func TestGetOrLoadTyped(t *testing.T) {
 		t.Fatalf("%+v %v calls=%d", r2, err, calls.Load())
 	}
 
-	// A payload of the wrong shape under the same key surfaces as a decode error.
+	// A cached payload of the wrong shape is dropped and loaded again instead of failing until its TTL.
 	e.mr.Set(testKey.Cache(), `{"schema_version":1,"status":"ok","data":[1,2]}`)
-	if _, err := GetOrLoad(context.Background(), s, testKey, LoadOptions{}, fetch); err == nil {
-		t.Fatal("expected decode error")
+	r3, err := GetOrLoad(context.Background(), s, testKey, LoadOptions{}, fetch)
+	if err != nil || r3.Cached || r3.Data.Name != "ACME GmbH" || calls.Load() != 2 {
+		t.Fatalf("self-heal: %+v %v calls=%d", r3, err, calls.Load())
 	}
 }
 

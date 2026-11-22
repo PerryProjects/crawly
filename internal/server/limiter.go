@@ -63,21 +63,6 @@ func (l *keyedLimiter) take(key string, now time.Time) (ok bool, wait time.Durat
 	return true, 0
 }
 
-// check reports whether key has a token left without consuming one.
-func (l *keyedLimiter) check(key string, now time.Time) (ok bool, wait time.Duration) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	e, found := l.m[key]
-	if !found {
-		return true, 0
-	}
-	tokens := e.lim.TokensAt(now)
-	if tokens >= 1 {
-		return true, 0
-	}
-	return false, time.Duration((1 - tokens) / float64(l.limit) * float64(time.Second))
-}
-
 func (l *keyedLimiter) bucket(key string, now time.Time) *rate.Limiter {
 	if e, ok := l.m[key]; ok {
 		e.last = now

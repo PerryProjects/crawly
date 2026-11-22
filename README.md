@@ -104,7 +104,8 @@ Undecodable or wrong-version entries are deleted and treated as a miss.
 - **Degraded results are cached briefly.** An imprint whose LLM extraction failed (only the text is usable) or a brand
   without Firecrawl's branding payload is served, but cached for `cache.ttl.partial` (1 h) instead of 30 days, so a
   transient upstream hiccup is not frozen for a month. `refresh=true` also bypasses Firecrawl's own result cache (`maxAge: 0`).
-- A failed forced refresh never overwrites a good entry (`error` envelopes are written with `SET NX`).
+- A forced refresh never replaces a complete entry with something worse: if the refresh yields an error, `not_found` or a
+  degraded result while a complete entry exists, the old entry is kept and served (`X-Cache-Refresh: kept-previous`).
 - When the pod-local singleflight leader runs a forced refresh, followers that joined share its result.
 - If the Redis `SET` fails after a load, the result is still returned (logged + `siteinfo.cache.write.failures`).
 - `X-Cache: HIT` also covers "another pod filled it while we waited for the lock" (no upstream call by us).
@@ -127,7 +128,7 @@ consumed when the refresh starts, so a failed refresh also starts the cooldown (
    text is recovered from the markdown.
 3. Try at most the top 2 linked candidates, then **at most 3 well-known paths** (`/impressum`, `/imprint`,
    `/legal-notice`). A page counts only if it returned a success status and contains an imprint marker word
-   (rejects soft-404 pages). Nothing found → status `not_found` (404, negative-cached).
+   (rejects soft-404 pages; marker words inside link text do not count, since every footer links "Impressum"). Nothing found → status `not_found` (404, negative-cached).
    A timeout/rate limit/cancellation aborts the lookup instead of being mistaken for "not found".
    **Parent domain:** if the host has no imprint and is a subdomain (`eu.store.bambulab.com`), the registrable parent
    (`bambulab.com`, via the public suffix list; `myshopify.com`-style hosters are excluded) is searched through its
@@ -174,7 +175,9 @@ consumed when the refresh starts, so a failed refresh also starts the cooldown (
 
 One homepage scrape with Firecrawl's `branding` format plus a JSON extraction (`description`, `tone_of_voice`,
 `language`). The untyped branding map is mapped into our own DTO — no SDK type reaches the HTTP API:
-`logo`, `favicon`, `og_image` (http(s) only, relative URLs resolved, `data:` URIs dropped), `color_scheme`,
+`logo`, `favicon`, `og_image` (http(s) URLs, relative URLs resolved, and `data:image/*` URIs up to 32 KiB because many
+sites inline their SVG logo; all other `data:` URIs are dropped. **Render these with `<img>` only**: an inline SVG opened
+as a document or in `<object>`/`<iframe>` can run script), `color_scheme`,
 `colors{primary, secondary, accent, background, text_primary, text_secondary}` (hex only; `rgb()` and named colors
 are dropped, not guessed), `fonts[]`, `typography{font_families, font_sizes, font_weights}`, `description`
 (falls back to page metadata), `tone_of_voice` (≤ 5 lowercase keywords) with `tone_source` and `language`
@@ -231,12 +234,12 @@ curl -s localhost:8080/healthz ; curl -s localhost:8080/readyz
 | 429 | rate limited: per IP (`rate_limited`), per token (`token_rate_limited`) or blocked after repeated auth failures (`too_many_auth_failures`); `Retry-After` = time until a token is free |
 | 404 | no imprint found (`imprint_not_found`, negative-cached, `X-Cache` set) |
 | 422 | invalid URL (`invalid_url`) or malformed parameter (`invalid_parameter`) |
-| 502 | upstream error for this site (`upstream_error`, cached 5 min) |
+| 502 | upstream error for this site (`upstream_error`, cached 5 min): the target failed (DNS, error status) or Firecrawl answered `success:false` for it |
 | 503 | overloaded (`overloaded`: in-flight cap or load admission), lock timeout, Redis down, shutting down, upstream rate limit, or Firecrawl refusing our account (`upstream_unavailable`: API key, credits) — with `Retry-After` |
 | 504 | upstream or handler timeout (`timeout`) |
 | 499 | client closed the request (non-standard, for log/metric clarity only) |
 
-Response headers: `X-Cache`, `X-Cache-Refresh: cooldown` (refresh throttled), `X-Request-Id` (an incoming
+Response headers: `X-Cache`, `X-Cache-Refresh: cooldown` (refresh throttled) or `kept-previous` (refresh was worse, old entry served), `X-Request-Id` (an incoming
 `X-Request-Id` is adopted if it is ≤ 64 chars of `[A-Za-z0-9._-]`).
 
 ## Configuration
@@ -292,7 +295,7 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | `protect.auth_failures_per_minute` | `SITEINFO_PROTECT_AUTH_FAILURES_PER_MINUTE` | `10` | failed authentications per IP before it is blocked, `0` = off |
 | `protect.max_inflight_requests` | `SITEINFO_PROTECT_MAX_INFLIGHT_REQUESTS` | `256` | concurrent `/v1` requests per pod, `0` = off |
 | `protect.max_tracked_keys` | `SITEINFO_PROTECT_MAX_TRACKED_KEYS` | `100000` | bound on limiter memory |
-| `protect.max_concurrent_loads` | `SITEINFO_PROTECT_MAX_CONCURRENT_LOADS` | `16` | concurrent upstream loads per pod, `0` = off |
+| `protect.max_concurrent_loads` | `SITEINFO_PROTECT_MAX_CONCURRENT_LOADS` | `8` | concurrent upstream loads per pod, `0` = off; keep it near 2 × `firecrawl.max_concurrency`, otherwise loads wait for a Firecrawl slot inside their 40 s budget |
 | `protect.load_rate` / `load_burst` | `SITEINFO_PROTECT_LOAD_RATE` / `…_LOAD_BURST` | `2` / `10` | upstream loads (cache misses) per second per pod, `0` = off |
 | `debug.enabled` | `SITEINFO_DEBUG_ENABLED` | `false` | debug aids (`debug=1` traces, cache flush, config view); **never in production** |
 | `otel.exporter` | `SITEINFO_OTEL_EXPORTER` | `otlp` | `otlp`, `stdout` or `none` |
@@ -317,7 +320,7 @@ depth, aimed at the two things that actually hurt here: exhausting the pod, and 
 |---|---|---|
 | Connections | `server.max_connections` (accept blocks at the cap), `ReadHeaderTimeout` (slowloris), `MaxHeaderBytes` | – |
 | Per client IP | token bucket `protect.ip_rate/ip_burst`, evaluated first, before authentication; IPv6 grouped by /64 | 429 `rate_limited` |
-| Brute force | `protect.auth_failures_per_minute` failed logins per IP, then that IP gets 429 even with a valid token until the budget refills; successful requests never consume it | 429 `too_many_auth_failures` |
+| Auth failures | `protect.auth_failures_per_minute` failed logins per IP; after that, further *failures* from that IP get 429 instead of 401. A valid token is never blocked, so a stranger cannot lock out callers that share an IP (e.g. everyone behind an ingress without `trusted_proxies`). Brute force is prevented by token length (>= 16 chars), not by this limit | 429 `too_many_auth_failures` |
 | Pod capacity | `protect.max_inflight_requests` concurrent `/v1` requests; excess is shed immediately, not queued | 503 `overloaded` |
 | Per API token | token bucket `protect.token_rate/token_burst` (after authentication) | 429 `token_rate_limited` |
 | **Upstream cost** | cache hits are untouched; *misses* pass admission control: `protect.max_concurrent_loads` and `protect.load_rate` per pod. Plus negative caching (`not_found` 24 h, `error` 5 min) and singleflight/lock dedup | 503 `overloaded` |
@@ -445,7 +448,9 @@ turns them on.
 
 - **SSRF.** `urlnorm` is purely syntactic: http/https only, no userinfo, default ports only, no fragment, no IP
   literals (including decimal/hex spellings), no `localhost`/`.local`/`.internal`/`.lan`/… suffixes. **It does not
-  resolve DNS**, so a public name pointing at a private address is not detected. The fetch happens inside
+  resolve DNS**, so a public name pointing at a private address is not detected. The same checks apply to links
+  discovered on crawled pages (imprint candidates), which come from untrusted HTML; redirects that Firecrawl follows
+  are outside this service's control. The fetch happens inside
   Firecrawl, so the exposure is Firecrawl's egress, not this pod's. If you run Firecrawl self-hosted, filter its
   egress (no RFC1918/link-local/metadata ranges). Whether the Firecrawl cloud blocks internal targets is not
   verified here.
@@ -468,6 +473,13 @@ turns them on.
   from Germany; before `firecrawl.country=DE` the imprint was not found, now it is (via the parent domain). The DE default is
   right for DACH, but a Swiss or Austrian site that only serves its own country could need a different value (one
   country per deployment; per-request country is not implemented).
+- **Outages are not site failures.** Firecrawl 5xx, unreachable Firecrawl, and account problems (401/402, pending
+  terms) return 503 `upstream_unavailable` and are never cached; only failures that belong to the site (target error
+  status, DNS, `success:false`) are cached as `error`. Firecrawl's own 408 counts as a timeout. A retry is only
+  started if the load budget still fits a full call, otherwise the classified error is returned.
+- **Cold cache after the v2 key bump.** Deploying the v2 key layout starts with an empty cache. The load admission
+  limits (`protect.load_rate`, `max_concurrent_loads`) then shed bursts with 503 `overloaded`; callers should retry with
+  `Retry-After`.
 - **Rate limits and `Retry-After`.** The SDK does not expose `Retry-After`; a transport wrapper captures it. A
   `Retry-After` longer than the remaining budget is not waited for.
 - **TTL rationale.** 30 days: imprints and brand identity change rarely and every miss costs Firecrawl credits;

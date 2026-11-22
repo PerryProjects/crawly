@@ -113,7 +113,7 @@ func fromCode(code string) apiError {
 	case crawler.CodeTimeout:
 		return apiError{status: http.StatusGatewayTimeout, code: codeTimeout, message: "the upstream crawler timed out"}
 	case crawler.CodeUnavailable:
-		return apiError{status: http.StatusServiceUnavailable, code: crawler.CodeUnavailable, message: "the upstream crawler refused this service's account (API key, credits); this is not a problem of the website", retryAfter: true}
+		return apiError{status: http.StatusServiceUnavailable, code: crawler.CodeUnavailable, message: "the upstream crawler is unavailable or refused this service's account; this is not a problem of the website", retryAfter: true}
 	case crawler.CodeRateLimited:
 		return apiError{status: http.StatusServiceUnavailable, code: codeRateLimited, message: "the upstream crawler is rate limited, retry later", retryAfter: true}
 	default:

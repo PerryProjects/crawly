@@ -359,3 +359,39 @@ func TestHugeTextIsTruncated(t *testing.T) {
 		t.Error("validation must still see the full text")
 	}
 }
+
+func TestSoftNotFoundWithImprintFooterIsRejected(t *testing.T) {
+	soft := "# Seite nicht gefunden\n\nFooter: [Impressum](https://acme.de/impressum) | [Datenschutz](/datenschutz)"
+	if reason := unusableReason(Extraction{StatusCode: 200, Text: soft}); reason == "" {
+		t.Fatal("a 404 page whose only 'Impressum' is a footer link must be rejected")
+	}
+	if reason := unusableReason(Extraction{StatusCode: 200, Text: imprintMD}); reason != "" {
+		t.Fatalf("a real imprint was rejected: %s", reason)
+	}
+}
+
+// After the markdown check accepted the page, a failed LLM call must not lose the imprint.
+type failingJSONSite struct{ *fakeSite }
+
+func (f failingJSONSite) Scrape(ctx context.Context, url string, req crawler.ScrapeRequest) (*crawler.Page, error) {
+	if req.JSON != nil {
+		f.mu.Lock()
+		f.calls = append(f.calls, url)
+		f.mu.Unlock()
+		return nil, fmt.Errorf("%w: HTTP 200 [SCRAPE_ALL_ENGINES_FAILED]", crawler.ErrUpstream)
+	}
+	return f.fakeSite.Scrape(ctx, url, req)
+}
+
+func TestExtractionFailureKeepsAcceptedPage(t *testing.T) {
+	site := failingJSONSite{&fakeSite{pages: map[string]*crawler.Page{
+		"https://acme.de/": {URL: "https://acme.de/"}, "https://acme.de/impressum": imprintPage("https://acme.de/impressum"),
+	}}}
+	imp, err := NewService(site, NewFirecrawlExtractor(site)).Lookup(context.Background(), "acme.de")
+	if err != nil {
+		t.Fatalf("err = %v, want the page with a partial warning", err)
+	}
+	if imp.Text != imprintMD || !imp.PartialResult() || imp.CompanyName != nil {
+		t.Fatalf("imp = %+v", imp)
+	}
+}

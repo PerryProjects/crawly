@@ -9,7 +9,7 @@ const HINTS = {
   imprint_not_found: 'Auf der Startseite wurde kein Impressum-Link gefunden und die Standardpfade (/impressum, /imprint, /legal-notice) lieferten keine Impressum-Seite. Das Ergebnis wird 24 h negativ gecacht. Der Trace zeigt die bewerteten Link-Kandidaten und die Ablehnungsgründe.',
   upstream_error: 'Firecrawl konnte die Seite nicht abrufen (z. B. DNS-Fehler, Seite antwortet mit Fehlerstatus, Blockade). Ein Fehlschlag wird 5 Minuten negativ gecacht; „Cache leeren" hebt das auf.',
   timeout: 'Firecrawl oder die Anfrage hat das Zeitlimit überschritten (Firecrawl 30 s je Aufruf, Load 40 s, Handler 45 s). Wird nicht gecacht.',
-  upstream_unavailable: 'Firecrawl lehnt das Konto dieses Dienstes ab: API-Key ungültig, Credits aufgebraucht oder Bedingungen nicht akzeptiert. Kein Problem der Website; wird nicht gecacht. Siehe Server-Log.',
+  upstream_unavailable: 'Firecrawl ist gestört (5xx, nicht erreichbar) oder lehnt das Konto ab (API-Key, Credits, Bedingungen). Kein Problem der Website; wird nicht gecacht. Siehe Server-Log.',
   upstream_rate_limited: 'Firecrawl hat mit 429 geantwortet (Konto-Limit). Wird nicht gecacht; später erneut versuchen.',
   rate_limited: 'Pro-IP-Limit der API erreicht (protect.ip_rate). Retry-After beachten.',
   token_rate_limited: 'Pro-Token-Limit der API erreicht (protect.token_rate).',

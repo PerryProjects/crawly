@@ -99,6 +99,9 @@ type Entry struct {
 	Cached bool
 	// RefreshThrottled is true when Refresh was requested but the cooldown was active.
 	RefreshThrottled bool
+	// RefreshKept is true when a forced refresh produced a worse result and the existing
+	// complete entry was kept and served instead.
+	RefreshKept bool
 }
 
 // Store is the Redis backed read-through cache.
@@ -417,14 +420,25 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 	fetched, ferr := fetch(ctx)
 	tr.Add("cache", "upstream finished", "duration", time.Since(fetchStart), "error", ferr)
 	env := Envelope{SchemaVersion: SchemaVersion, FetchedAt: s.now().UTC()}
+	var verdict Verdict
 	if ferr == nil {
 		env.Status, env.Data, env.Partial = StatusOK, fetched.Data, fetched.Partial
-	} else {
-		v := s.classify(ferr)
-		if v.Status == "" {
-			return loadResult{err: ferr} // transient / not site specific: never cached
+	} else if verdict = s.classify(ferr); verdict.Status != "" {
+		env.Status, env.ErrorCode = verdict.Status, verdict.Code
+	}
+
+	// A forced refresh must not replace a complete entry with something worse (an error, a
+	// not_found caused by a temporarily broken page, a degraded result). Keep and serve the old one.
+	if forceFresh && (env.Status != StatusOK || env.Partial) {
+		if old, found, gerr := s.get(ctx, key); gerr == nil && found && old.Status == StatusOK && !old.Partial {
+			tr.Add("cache", "refresh result is worse than the cached entry; keeping the cached entry",
+				"refresh_status", string(env.Status), "refresh_partial", env.Partial, "error", ferr)
+			outcome = "refresh_kept"
+			return loadResult{entry: Entry{Envelope: old, Cached: true, RefreshKept: true}}
 		}
-		env.Status, env.ErrorCode = v.Status, v.Code
+	}
+	if ferr != nil && verdict.Status == "" {
+		return loadResult{err: ferr} // transient / not site specific: never cached
 	}
 	outcome = string(env.Status)
 	tr.Add("cache", "storing result", "status", string(env.Status), "partial", env.Partial, "ttl", s.ttl(key, env).String(), "error_code", env.ErrorCode)

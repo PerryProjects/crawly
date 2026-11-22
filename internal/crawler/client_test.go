@@ -71,9 +71,10 @@ func TestRetryAndErrorMapping(t *testing.T) {
 	}{
 		{"success", []error{nil}, 1, nil, []string{"ok"}},
 		{"429 then ok", []error{rateLimit(), nil}, 2, nil, []string{"rate_limited", "ok"}},
-		{"500 then ok", []error{httpErr(500), nil}, 2, nil, []string{"error", "ok"}},
+		{"500 then ok", []error{httpErr(500), nil}, 2, nil, []string{"outage", "ok"}},
 		{"429 forever gives up after max retries", []error{rateLimit(), rateLimit(), rateLimit(), nil}, 3, ErrRateLimited, []string{"rate_limited", "rate_limited", "rate_limited"}},
-		{"503 forever", []error{httpErr(503), httpErr(503), httpErr(503)}, 3, ErrUpstream, []string{"error", "error", "error"}},
+		{"503 forever is an outage", []error{httpErr(503), httpErr(503), httpErr(503)}, 3, ErrUpstreamUnavailable, []string{"outage", "outage", "outage"}},
+		{"firecrawl 408 is a timeout, not retried", []error{httpErr(http.StatusRequestTimeout)}, 1, ErrUpstreamTimeout, []string{"timeout"}},
 		{"400 is not retried", []error{httpErr(400)}, 1, ErrUpstream, []string{"error"}},
 		{"200 success:false is not retried", []error{&firecrawl.FirecrawlError{StatusCode: 200, ErrorCode: "SCRAPE_DNS_RESOLUTION_ERROR"}}, 1, ErrUpstream, []string{"error"}},
 		{"timeout is not retried", []error{context.DeadlineExceeded}, 1, ErrUpstreamTimeout, []string{"timeout"}},
@@ -356,14 +357,14 @@ func TestSDKTransportErrorIsRetried(t *testing.T) {
 	}
 }
 
-func TestSDK5xxBecomesErrUpstream(t *testing.T) {
+func TestSDK5xxIsAnOutageNotASiteFailure(t *testing.T) {
 	c := newSDKClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = io.WriteString(w, `{"error":"bad gateway"}`)
 	}, WithSleep((&sleeps{}).sleep))
 	_, err := c.Scrape(context.Background(), "https://example.de/", ScrapeRequest{})
 	var fe *firecrawl.FirecrawlError
-	if !errors.Is(err, ErrUpstream) || !errors.As(err, &fe) || fe.StatusCode != http.StatusBadGateway {
+	if !errors.Is(err, ErrUpstreamUnavailable) || errors.Is(err, ErrUpstream) || !errors.As(err, &fe) || fe.StatusCode != http.StatusBadGateway {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -412,5 +413,16 @@ func TestFreshContextBypassesFirecrawlCache(t *testing.T) {
 	}
 	if _, ok := bodies[1]["maxAge"]; ok {
 		t.Errorf("normal calls leave Firecrawl's default max age: %v", bodies[1]["maxAge"])
+	}
+}
+
+func TestNoRetryThatTheDeadlineWouldCut(t *testing.T) {
+	fs := &fakeScraper{fn: func(context.Context, int) (*firecrawl.Document, error) { return nil, httpErr(500) }}
+	c := New(fs, WithTimeout(time.Second), WithSleep((&sleeps{}).sleep), WithBackoff(time.Millisecond))
+	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond) // less than one more call
+	defer cancel()
+	_, err := c.Scrape(ctx, "https://example.de/", ScrapeRequest{})
+	if fs.calls != 1 || !errors.Is(err, ErrUpstreamUnavailable) {
+		t.Fatalf("calls=%d err=%v; want one call and the classified error", fs.calls, err)
 	}
 }

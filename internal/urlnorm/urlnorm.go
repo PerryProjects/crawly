@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -42,6 +43,23 @@ var trackingParams = []string{"fbclid", "gclid", "dclid", "msclkid", "yclid", "m
 
 var trackingPrefixes = []string{"utm_", "pk_", "mtm_", "hsa_"}
 
+var reScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+
+// SafeLink reports whether a URL found on a crawled page may be fetched: http(s), no userinfo,
+// default port, and a host that passes the same checks as user input (no IP literal, no
+// internal name). Discovered links come from untrusted pages, so they get the same SSRF
+// screening; as with user input, DNS is not resolved here.
+func SafeLink(u *url.URL) bool {
+	if (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return false
+	}
+	if p := u.Port(); p != "" && (u.Scheme != "http" || p != "80") && (u.Scheme != "https" || p != "443") {
+		return false
+	}
+	_, err := normalizeHost(u.Hostname())
+	return err == nil
+}
+
 // Normalize validates raw and returns its normalized form.
 // An input without a scheme ("example.de/foo") is treated as https.
 func Normalize(raw string) (Result, error) {
@@ -52,7 +70,7 @@ func Normalize(raw string) (Result, error) {
 	if len(raw) > maxInputLen {
 		return Result{}, invalid("longer than %d bytes", maxInputLen)
 	}
-	if !strings.Contains(raw, "://") {
+	if !reScheme.MatchString(raw) {
 		raw = "https://" + raw
 	}
 	u, err := url.Parse(raw)

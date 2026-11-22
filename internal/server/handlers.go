@@ -19,7 +19,7 @@ import (
 // Response headers.
 const (
 	headerCache        = "X-Cache"         // HIT or MISS
-	headerCacheRefresh = "X-Cache-Refresh" // "cooldown" when refresh=true was throttled
+	headerCacheRefresh = "X-Cache-Refresh" // "cooldown" (refresh throttled) or "kept-previous" (refresh was worse)
 )
 
 // imprintResponse is the flat JSON body of GET /v1/imprint.
@@ -109,8 +109,11 @@ func serve[T any](s *Server, c *echo.Context, kind cache.Kind, notFound error,
 		dbg.finish(ctx, c, s, key, err)
 		return err
 	}
-	if res.RefreshThrottled {
+	switch {
+	case res.RefreshThrottled:
 		c.Response().Header().Set(headerCacheRefresh, "cooldown")
+	case res.RefreshKept:
+		c.Response().Header().Set(headerCacheRefresh, "kept-previous")
 	}
 
 	blk := dbg.finish(ctx, c, s, key, nil)

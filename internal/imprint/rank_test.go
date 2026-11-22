@@ -131,3 +131,19 @@ func TestMarkdownLinksAndMerge(t *testing.T) {
 		t.Fatalf("merged = %v", merged)
 	}
 }
+
+func TestRankLinksRejectsUnsafeTargets(t *testing.T) {
+	base, _ := url.Parse("https://acme.de/")
+	got := RankLinks([]string{"acme.de"}, base, []Link{
+		{URL: "http://10.0.0.12:8080/impressum", Text: "Impressum"},
+		{URL: "http://192.168.1.1/impressum", Text: "Impressum"},
+		{URL: "https://intranet.local/impressum", Text: "Impressum"},
+		{URL: "https://acme.de:8443/impressum", Text: "Impressum"},
+		{URL: "https://user:pw@acme.de/impressum", Text: "Impressum"},
+		{URL: "http://[::1]/impressum", Text: "Impressum"},
+		{URL: "http://acme.de/impressum", Text: "Impressum"}, // plain http on the default port is fine
+	})
+	if len(got) != 1 || got[0].URL != "http://acme.de/impressum" {
+		t.Fatalf("got %v", urls(got))
+	}
+}

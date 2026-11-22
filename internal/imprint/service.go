@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -193,12 +194,17 @@ func unusableReason(x Extraction) string {
 	case strings.TrimSpace(x.Text) == "":
 		return "empty page"
 	}
-	lower := strings.ToLower(x.Text)
+	// Link text does not count: with the full page every footer says "Impressum", including the
+	// footer of a "page not found" page.
+	lower := strings.ToLower(mdLinkOrImage.ReplaceAllString(x.Text, " "))
 	if !slices.ContainsFunc(imprintMarkers, func(m string) bool { return strings.Contains(lower, m) }) {
-		return "no imprint marker word in the text (soft 404?)"
+		return "no imprint marker word outside of links (soft 404?)"
 	}
 	return ""
 }
+
+// mdLinkOrImage matches markdown links and images, including their text.
+var mdLinkOrImage = regexp.MustCompile(`!?\[[^\]]*\]\([^)]*\)`)
 
 func build(x Extraction, c Candidate, hosts []string) *Imprint {
 	imp := &Imprint{ImprintURL: x.URL, Fields: x.Fields, Text: x.Text}

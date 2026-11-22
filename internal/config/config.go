@@ -176,7 +176,7 @@ func Default() Config {
 			AuthFailuresPerMinute: 10,
 			MaxInflightRequests:   256,
 			MaxTrackedKeys:        100_000,
-			MaxConcurrentLoads:    16,
+			MaxConcurrentLoads:    8,
 			LoadRate:              2, LoadBurst: 10,
 		},
 		Otel: OtelConfig{Exporter: "otlp", Interval: 30 * time.Second, ServiceName: "siteinfo"},

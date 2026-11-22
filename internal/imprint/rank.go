@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/OWNER/siteinfo/internal/urlnorm"
 )
 
 // Link is a hyperlink found on a page. Text may be empty.
@@ -98,8 +100,8 @@ func resolve(base *url.URL, raw string) (*url.URL, bool) {
 	if base != nil {
 		u = base.ResolveReference(u)
 	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
-		return nil, false
+	if !urlnorm.SafeLink(u) {
+		return nil, false // also SSRF screening: no IP literals, internal names or odd ports
 	}
 	u.Fragment = ""
 	return u, true

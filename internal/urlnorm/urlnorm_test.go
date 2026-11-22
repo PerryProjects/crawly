@@ -86,3 +86,10 @@ func TestNormalizeRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestSchemelessInputWithURLInQuery(t *testing.T) {
+	got, err := Normalize("example.de/?r=https://x.de")
+	if err != nil || got.Host != "example.de" {
+		t.Fatalf("%+v %v", got, err)
+	}
+}

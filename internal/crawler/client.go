@@ -152,8 +152,10 @@ func (c *Client) Scrape(ctx context.Context, url string, req ScrapeRequest) (*Pa
 		if retryAfter > delay {
 			delay = min(retryAfter, c.timeout)
 		}
-		if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= delay {
-			return nil, err // not enough budget left to wait and retry
+		if dl, ok := ctx.Deadline(); ok && time.Until(dl) < delay+c.timeout {
+			// A retry that the load deadline would cut short only burns credits and turns a
+			// classified (cacheable) error into an uncached deadline error.
+			return nil, err
 		}
 		c.log.Debugw("retrying firecrawl call", observability.Fields(ctx), "attempt", attempt+1, "delay", delay, "code", ErrorCode(err))
 		if serr := c.sleep(ctx, delay); serr != nil {
@@ -183,7 +185,7 @@ func (c *Client) attempt(ctx context.Context, url string, opts *firecrawl.Scrape
 	doc, err := c.sc.Scrape(callCtx, url, opts)
 	outcome, err := classify(ctx, err)
 	c.obs.UpstreamCall(outcome)
-	if errors.Is(err, ErrUpstreamUnavailable) {
+	if outcome == "account_error" {
 		c.log.Errorw("firecrawl refused the account: check API key, remaining credits and pending terms", "error", err)
 	}
 	tr.Add("crawler", "firecrawl call", "url", url, "attempt", n, "outcome", outcome, "duration", time.Since(callStart),
@@ -238,6 +240,11 @@ func classify(parent context.Context, err error) (outcome string, _ error) {
 	switch {
 	case errors.As(err, &auth), errors.As(err, &fe) && (fe.StatusCode == http.StatusPaymentRequired || fe.RequiresAction != nil):
 		return "account_error", fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
+	case errors.As(err, &fe) && fe.StatusCode == http.StatusRequestTimeout:
+		return "timeout", fmt.Errorf("%w: %w", ErrUpstreamTimeout, err) // Firecrawl's own scrape timeout
+	case errors.As(err, &fe) && (fe.StatusCode >= 500 || fe.StatusCode == 0 && errors.Unwrap(fe) != nil):
+		// Firecrawl failing or unreachable: an outage, not a property of the site.
+		return "outage", fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
 	case errors.As(err, &rl):
 		return "rate_limited", fmt.Errorf("%w: %w", ErrRateLimited, err)
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
@@ -247,21 +254,18 @@ func classify(parent context.Context, err error) (outcome string, _ error) {
 	}
 }
 
-// retryable: 429, 408/409, 5xx and transport failures. Timeouts are not retried
-// because the retry could not finish inside the load deadline anyway.
+// retryable: 429, 409, 5xx and transport failures. Timeouts (including Firecrawl's 408)
+// are not retried because the retry could not finish inside the load deadline anyway.
 func retryable(err error) bool {
 	if errors.Is(err, ErrRateLimited) {
 		return true
 	}
-	if !errors.Is(err, ErrUpstream) {
-		return false
-	}
 	var fe *firecrawl.FirecrawlError
-	if !errors.As(err, &fe) {
+	if !errors.As(err, &fe) || fe.RequiresAction != nil {
 		return false
 	}
 	switch {
-	case fe.StatusCode >= 500, fe.StatusCode == http.StatusRequestTimeout, fe.StatusCode == http.StatusConflict:
+	case fe.StatusCode >= 500, fe.StatusCode == http.StatusConflict:
 		return true
 	case fe.StatusCode == 0:
 		return errors.Unwrap(fe) != nil // transport error carries its cause

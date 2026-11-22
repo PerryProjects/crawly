@@ -167,8 +167,9 @@ func (s *Server) reject(status int, code, reason string, wait time.Duration) err
 // protect applies the cheap, unauthenticated checks first:
 //
 //  1. per-IP token bucket (429)
-//  2. IPs that keep failing authentication are blocked (429)
-//  3. in-flight cap: shed instead of queueing (503)
+//  2. in-flight cap: shed instead of queueing (503)
+//
+// Repeated authentication failures are handled in authenticate.
 func (s *Server) protect(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		ip := clientKey(c.RealIP())
@@ -176,11 +177,6 @@ func (s *Server) protect(next echo.HandlerFunc) echo.HandlerFunc {
 		if s.ipLimiter != nil {
 			if ok, wait := s.ipLimiter.take(ip, now); !ok {
 				return s.reject(http.StatusTooManyRequests, codeRateLimitedClient, "ip_rate", wait)
-			}
-		}
-		if s.failLimiter != nil {
-			if ok, wait := s.failLimiter.check(ip, now); !ok {
-				return s.reject(http.StatusTooManyRequests, codeTooManyAuthFailures, "auth_failures", wait)
 			}
 		}
 		if s.inflight != nil {
@@ -198,7 +194,12 @@ func (s *Server) protect(next echo.HandlerFunc) echo.HandlerFunc {
 var errUnauthorized = errors.New("unauthorized")
 
 // authenticate enforces a static bearer token, compared in constant time, then
-// applies the per-token rate limit. Failed attempts are counted per IP.
+// applies the per-token rate limit.
+//
+// Failed attempts are counted per IP; once an IP exceeds its budget its failures get 429
+// instead of 401. A valid token is never blocked: behind a proxy without trusted_proxies
+// all clients share one IP, and blocking valid tokens there would let anyone lock out every
+// caller. Guessing is not what this prevents (tokens have >= 16 characters); it bounds noise.
 func (s *Server) authenticate(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		if s.noAuth {
@@ -215,7 +216,9 @@ func (s *Server) authenticate(next echo.HandlerFunc) echo.HandlerFunc {
 		now := s.now()
 		if match < 0 {
 			if s.failLimiter != nil {
-				s.failLimiter.take(clientKey(c.RealIP()), now)
+				if ok, wait := s.failLimiter.take(clientKey(c.RealIP()), now); !ok {
+					return s.reject(http.StatusTooManyRequests, codeTooManyAuthFailures, "auth_failures", wait)
+				}
 			}
 			c.Response().Header().Set("WWW-Authenticate", "Bearer")
 			return errUnauthorized

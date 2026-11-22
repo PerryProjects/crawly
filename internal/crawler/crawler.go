@@ -15,10 +15,10 @@ var (
 	ErrUpstreamTimeout = errors.New("crawler: upstream timeout")
 	// ErrRateLimited means Firecrawl answered HTTP 429 and retries were exhausted.
 	ErrRateLimited = errors.New("crawler: upstream rate limited")
-	// ErrUpstreamUnavailable means Firecrawl refused OUR account: invalid API key (401), no
-	// credits left (402) or an out-of-band action such as accepting terms. It says nothing
-	// about the website, so it must never be cached as a per-site failure.
-	ErrUpstreamUnavailable = errors.New("crawler: upstream refused the account")
+	// ErrUpstreamUnavailable means Firecrawl itself could not serve us: it refused our account
+	// (invalid API key 401, no credits 402, pending terms) or it is failing (5xx, unreachable).
+	// It says nothing about the website, so it must never be cached as a per-site failure.
+	ErrUpstreamUnavailable = errors.New("crawler: upstream unavailable")
 )
 
 // Stable error codes, also used as error_code in cached failure envelopes.

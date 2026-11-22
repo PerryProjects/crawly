@@ -2,6 +2,7 @@ package imprint
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/OWNER/siteinfo/internal/crawler"
@@ -57,7 +58,13 @@ func (e *FirecrawlExtractor) Extract(ctx context.Context, pageURL string) (Extra
 		JSON:     &crawler.JSONExtract{Prompt: extractionPrompt, Schema: extractionSchema()},
 	})
 	if err != nil {
-		return Extraction{}, fmt.Errorf("imprint: extract %s: %w", pageURL, err)
+		if !errors.Is(err, crawler.ErrUpstream) {
+			return Extraction{}, fmt.Errorf("imprint: extract %s: %w", pageURL, err) // timeout, account, cancel
+		}
+		// The page is a confirmed imprint; losing it over a failed LLM call would turn into a cached 404.
+		// Keep the text and let the short partial TTL retry the extraction soon.
+		x.Warnings = append(x.Warnings, Warning{Code: WarnExtractionUnavailable, Message: "structured extraction failed: " + err.Error()})
+		return x, nil
 	}
 	if page.JSON == nil {
 		x.Warnings = append(x.Warnings, Warning{Code: WarnExtractionUnavailable, Message: "structured extraction returned no data"})
