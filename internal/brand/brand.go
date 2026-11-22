@@ -10,7 +10,6 @@ package brand
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -61,7 +60,25 @@ type Brand struct {
 	ToneOfVoice []string `json:"tone_of_voice"`
 	ToneSource  *string  `json:"tone_source"`
 	Language    *string  `json:"language"` // primary language subtag, e.g. "de"
+	// Warnings lists what is missing because an upstream part failed. Never nil in output.
+	Warnings []Warning `json:"warnings"`
 }
+
+// Warning has the same shape as imprint.Warning: a stable Code and a human Message.
+type Warning struct {
+	Code    string `json:"code"`
+	Field   string `json:"field,omitempty"`
+	Message string `json:"message"`
+}
+
+// Warning codes.
+const (
+	WarnBrandingUnavailable   = "branding_unavailable"   // Firecrawl returned no branding payload (logo, colors, fonts)
+	WarnExtractionUnavailable = "extraction_unavailable" // the LLM extraction (description, tone, language) returned nothing
+)
+
+// PartialResult reports a degraded result, which the cache keeps only for the short partial TTL.
+func (b *Brand) PartialResult() bool { return len(b.Warnings) > 0 }
 
 // Scraper is what this package needs from the crawler.
 type Scraper interface {
@@ -90,7 +107,7 @@ func NewService(scraper Scraper, opts ...Option) *Service {
 }
 
 const extractionPrompt = `From this homepage return:
-- description: a neutral one or two sentence description of what the organization does, in the language of the page. Use only what the page says.
+- description: a neutral one or two sentence description of what the organization does. Write it in the main language of the page (German for a German page), never translate it. Use only what the page says.
 - tone_of_voice: up to 5 short lowercase English keywords describing the writing style (e.g. professional, friendly, technical, playful, formal).
 - language: the ISO 639-1 code of the main page language.
 Return null for anything you cannot determine.`
@@ -112,16 +129,12 @@ func extractionSchema() map[string]any {
 // Lookup scrapes the homepage of host (normalized, no scheme) and maps the result.
 func (s *Service) Lookup(ctx context.Context, host string) (*Brand, error) {
 	homepage := "https://" + host + "/"
-	page, err := s.scraper.Scrape(ctx, homepage, crawler.ScrapeRequest{
+	page, err := crawler.ScrapeHomepage(ctx, s.scraper, host, crawler.ScrapeRequest{
 		Branding: true,
 		JSON:     &crawler.JSONExtract{Prompt: extractionPrompt, Schema: extractionSchema()},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("brand: scrape homepage: %w", err)
-	}
-	if page.StatusCode >= http.StatusBadRequest {
-		// Firecrawl answers HTTP 200 with metadata.statusCode of the target (verified live for a 404).
-		return nil, fmt.Errorf("%w: homepage returned HTTP %d", crawler.ErrUpstream, page.StatusCode)
 	}
 	base, err := url.Parse(page.URL)
 	if err != nil || base.Host == "" {
@@ -138,6 +151,10 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Brand, error) {
 		"tone_source", deref(b.ToneSource))
 	if page.Branding == nil {
 		s.log.Warnw("firecrawl returned no branding payload", observability.Fields(ctx), "host", host)
+		b.Warnings = append(b.Warnings, Warning{Code: WarnBrandingUnavailable, Message: "Firecrawl returned no branding data; logo, colors and fonts are missing"})
+	}
+	if page.JSON == nil {
+		b.Warnings = append(b.Warnings, Warning{Code: WarnExtractionUnavailable, Message: "the LLM extraction returned nothing; description, tone and language may be missing or come from page metadata"})
 	}
 	return b, nil
 }
@@ -146,6 +163,7 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Brand, error) {
 func Map(page *crawler.Page, base *url.URL) *Brand {
 	br := page.Branding
 	b := &Brand{
+		Warnings:    []Warning{},
 		Fonts:       []Font{},
 		ToneOfVoice: []string{},
 		Typography:  Typography{FontFamilies: map[string]string{}, FontSizes: map[string]string{}, FontWeights: map[string]int{}},

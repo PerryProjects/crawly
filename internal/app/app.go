@@ -87,7 +87,7 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 		cache.WithLockMargin(cfg.Cache.LockMargin),
 		cache.WithTTLs(cache.TTLs{
 			ImprintOK: cfg.Cache.TTL.ImprintOK, BrandOK: cfg.Cache.TTL.BrandOK,
-			NotFound: cfg.Cache.TTL.NotFound, Error: cfg.Cache.TTL.Error,
+			NotFound: cfg.Cache.TTL.NotFound, Error: cfg.Cache.TTL.Error, Partial: cfg.Cache.TTL.Partial,
 		}),
 		cache.WithRefreshCooldown(cfg.Cache.RefreshCool),
 		cache.WithLoadLimits(cfg.Protect.MaxConcurrentLoads, cfg.Protect.LoadRate, cfg.Protect.LoadBurst),
@@ -192,8 +192,8 @@ func classify(err error) cache.Verdict {
 	switch {
 	case errors.Is(err, imprint.ErrNotFound):
 		return cache.Verdict{Status: cache.StatusNotFound, Code: "not_found"}
-	case errors.Is(err, crawler.ErrRateLimited):
-		return cache.Verdict{}
+	case errors.Is(err, crawler.ErrRateLimited), errors.Is(err, crawler.ErrUpstreamUnavailable):
+		return cache.Verdict{} // our account's state, not the site's
 	case errors.Is(err, crawler.ErrUpstreamTimeout):
 		return cache.Verdict{Status: cache.StatusError, Code: crawler.CodeTimeout}
 	case errors.Is(err, crawler.ErrUpstream):

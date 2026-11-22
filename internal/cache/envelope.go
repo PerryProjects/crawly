@@ -27,6 +27,7 @@ type Envelope struct {
 	FetchedAt     time.Time       `json:"fetched_at"`
 	Data          json.RawMessage `json:"data,omitempty"`
 	ErrorCode     string          `json:"error_code,omitempty"`
+	Partial       bool            `json:"partial,omitempty"` // degraded ok result, cached with the short partial TTL
 }
 
 // Encode serializes the envelope.

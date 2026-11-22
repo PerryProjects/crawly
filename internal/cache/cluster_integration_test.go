@@ -48,10 +48,10 @@ func TestClusterReadThroughAndHashTags(t *testing.T) {
 		t.Cleanup(func() { rdb.Del(ctx, Key{KindImprint, host}.Cache(), Key{KindImprint, host}.Cooldown()) })
 		for range 10 {
 			wg.Go(func() {
-				_, err := s.Load(ctx, Key{Kind: KindImprint, Host: host}, func(context.Context) (json.RawMessage, error) {
+				_, err := s.Load(ctx, Key{Kind: KindImprint, Host: host}, func(context.Context) (Fetched, error) {
 					calls[h].Add(1)
 					time.Sleep(200 * time.Millisecond)
-					return json.RawMessage(`{"ok":true}`), nil
+					return Fetched{Data: json.RawMessage(`{"ok":true}`)}, nil
 				}, LoadOptions{})
 				if err != nil {
 					t.Error(err)

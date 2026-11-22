@@ -86,16 +86,16 @@ var errGone = errors.New("gone")
 var testKey = Key{Kind: KindImprint, Host: "example.de"}
 
 func okFetch(counter *atomic.Int32, gate <-chan struct{}) FetchFunc {
-	return func(ctx context.Context) (json.RawMessage, error) {
+	return func(ctx context.Context) (Fetched, error) {
 		counter.Add(1)
 		if gate != nil {
 			select {
 			case <-gate:
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return Fetched{}, ctx.Err()
 			}
 		}
-		return json.RawMessage(`{"v":1}`), nil
+		return Fetched{Data: json.RawMessage(`{"v":1}`)}, nil
 	}
 }
 
@@ -112,7 +112,7 @@ func waitFor(t *testing.T, cond func() bool) {
 
 func TestKeysUseHashTag(t *testing.T) {
 	k := Key{Kind: KindBrand, Host: "xn--bcher-kva.de"}
-	if k.Cache() != "brand:v1:{xn--bcher-kva.de}" || k.Lock() != "lock:brand:v1:{xn--bcher-kva.de}" {
+	if k.Cache() != "brand:v2:{xn--bcher-kva.de}" || k.Lock() != "lock:brand:v2:{xn--bcher-kva.de}" {
 		t.Fatalf("keys: %s %s", k.Cache(), k.Lock())
 	}
 	if !strings.HasSuffix(k.Cooldown(), "{xn--bcher-kva.de}") {
@@ -340,7 +340,7 @@ func TestNegativeCaching(t *testing.T) {
 		e := newEnv(t)
 		s := e.store()
 		var calls atomic.Int32
-		fetch := func(context.Context) (json.RawMessage, error) { calls.Add(1); return nil, errUpstream }
+		fetch := func(context.Context) (Fetched, error) { calls.Add(1); return Fetched{}, errUpstream }
 
 		_, err := s.Load(context.Background(), testKey, fetch, LoadOptions{})
 		if !errors.Is(err, errUpstream) {
@@ -362,7 +362,7 @@ func TestNegativeCaching(t *testing.T) {
 		e := newEnv(t)
 		s := e.store()
 		var calls atomic.Int32
-		fetch := func(context.Context) (json.RawMessage, error) { calls.Add(1); return nil, errGone }
+		fetch := func(context.Context) (Fetched, error) { calls.Add(1); return Fetched{}, errGone }
 		for i, wantCached := range []bool{false, true} {
 			entry, err := s.Load(context.Background(), testKey, fetch, LoadOptions{})
 			if err != nil || entry.Status != StatusNotFound || entry.Cached != wantCached {
@@ -381,7 +381,7 @@ func TestNegativeCaching(t *testing.T) {
 		s := e.store()
 		boom := errors.New("transient")
 		for range 2 {
-			if _, err := s.Load(context.Background(), testKey, func(context.Context) (json.RawMessage, error) { return nil, boom }, LoadOptions{}); !errors.Is(err, boom) {
+			if _, err := s.Load(context.Background(), testKey, func(context.Context) (Fetched, error) { return Fetched{}, boom }, LoadOptions{}); !errors.Is(err, boom) {
 				t.Fatalf("err = %v", err)
 			}
 		}
@@ -423,7 +423,7 @@ func TestFailedRefreshKeepsGoodEntry(t *testing.T) {
 	if _, err := s.Load(ctx, testKey, okFetch(&calls, nil), LoadOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.Load(ctx, testKey, func(context.Context) (json.RawMessage, error) { return nil, errUpstream }, LoadOptions{Refresh: true})
+	_, err := s.Load(ctx, testKey, func(context.Context) (Fetched, error) { return Fetched{}, errUpstream }, LoadOptions{Refresh: true})
 	if !errors.Is(err, errUpstream) {
 		t.Fatalf("err = %v", err)
 	}
@@ -510,7 +510,7 @@ func TestRedisDownIsStoreUnavailable(t *testing.T) {
 func TestFetchPanicBecomesError(t *testing.T) {
 	e := newEnv(t)
 	s := e.store()
-	_, err := s.Load(context.Background(), testKey, func(context.Context) (json.RawMessage, error) { panic("boom") }, LoadOptions{})
+	_, err := s.Load(context.Background(), testKey, func(context.Context) (Fetched, error) { panic("boom") }, LoadOptions{})
 	if err == nil || !strings.Contains(err.Error(), "panicked") {
 		t.Fatalf("err = %v", err)
 	}
@@ -654,5 +654,38 @@ func TestInspectRedisDown(t *testing.T) {
 	}
 	if _, err := s.Flush(context.Background(), testKey); !errors.Is(err, ErrStoreUnavailable) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+type partialPayload struct {
+	Name    string `json:"name"`
+	Degrade bool   `json:"degrade"`
+}
+
+func (p partialPayload) PartialResult() bool { return p.Degrade }
+
+func TestPartialResultsGetTheShortTTL(t *testing.T) {
+	e := newEnv(t)
+	s := e.store(WithTTLs(TTLs{ImprintOK: 30 * 24 * time.Hour, BrandOK: time.Hour, NotFound: time.Hour, Error: time.Minute, Partial: 2 * time.Hour}))
+	ctx := context.Background()
+	full, degraded := Key{Kind: KindImprint, Host: "full.de"}, Key{Kind: KindImprint, Host: "degraded.de"}
+
+	if _, err := GetOrLoad(ctx, s, full, LoadOptions{}, func(context.Context) (partialPayload, error) { return partialPayload{Name: "a"}, nil }); err != nil {
+		t.Fatal(err)
+	}
+	r, err := GetOrLoad(ctx, s, degraded, LoadOptions{}, func(context.Context) (partialPayload, error) {
+		return partialPayload{Name: "b", Degrade: true}, nil
+	})
+	if err != nil || r.Status != StatusOK || r.Data.Name != "b" {
+		t.Fatalf("a partial result is still served: %+v %v", r, err)
+	}
+	if ttl := e.mr.TTL(full.Cache()); ttl != 30*24*time.Hour {
+		t.Errorf("full ttl = %s", ttl)
+	}
+	if ttl := e.mr.TTL(degraded.Cache()); ttl != 2*time.Hour {
+		t.Errorf("partial ttl = %s, want 2h", ttl)
+	}
+	if info, _ := s.Inspect(ctx, degraded); !info.Partial {
+		t.Error("Inspect must report the partial flag")
 	}
 }

@@ -119,7 +119,7 @@ func TestDebugTraceMissThenHit(t *testing.T) {
 		t.Errorf("a loading request needs no note: %v", d["note"])
 	}
 	ci := d["cache"].(map[string]any)
-	if ci["exists"] != true || ci["status"] != "ok" || ci["cache_key"] != "imprint:v1:{acme.de}" || ci["ttl_seconds"].(float64) < 29*24*3600 {
+	if ci["exists"] != true || ci["status"] != "ok" || ci["cache_key"] != "imprint:v2:{acme.de}" || ci["ttl_seconds"].(float64) < 29*24*3600 {
 		t.Errorf("cache info = %v", ci)
 	}
 	// Trace events are ordered in time.

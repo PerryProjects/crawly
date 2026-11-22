@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 	"golang.org/x/net/publicsuffix"
@@ -72,7 +72,8 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Imprint, error) {
 	imp, perr := s.lookupHost(ctx, parent, []string{host}, false)
 	switch {
 	case perr == nil:
-		imp.Warnings = append(imp.Warnings, fmt.Sprintf("imprint taken from the parent domain %s; %s has none of its own", parent, host))
+		imp.Warnings = append(imp.Warnings, Warning{Code: WarnParentDomain, Field: "imprint_url",
+			Message: fmt.Sprintf("imprint taken from the parent domain %s; %s has none of its own", parent, host)})
 		return imp, nil
 	case errors.Is(perr, ErrNotFound), errors.Is(perr, crawler.ErrUpstream) && !hardFailure(perr):
 		tr.Add("imprint", "parent domain has no imprint either", "parent", parent, "error", perr)
@@ -98,13 +99,9 @@ func parentDomain(host string) (string, bool) {
 func (s *Service) lookupHost(ctx context.Context, host string, extraHosts []string, probes bool) (*Imprint, error) {
 	homepage := "https://" + host + "/"
 
-	home, err := s.scraper.Scrape(ctx, homepage, crawler.ScrapeRequest{Markdown: true, Links: true, FullPage: true})
+	home, err := crawler.ScrapeHomepage(ctx, s.scraper, host, crawler.ScrapeRequest{Markdown: true, Links: true, FullPage: true})
 	if err != nil {
 		return nil, fmt.Errorf("imprint: scrape homepage: %w", err)
-	}
-	if home.StatusCode >= http.StatusBadRequest {
-		// Firecrawl answers HTTP 200 with metadata.statusCode of the target (verified live for a 404).
-		return nil, fmt.Errorf("%w: homepage returned HTTP %d", crawler.ErrUpstream, home.StatusCode)
 	}
 	base, err := url.Parse(home.URL)
 	if err != nil || base.Hostname() == "" {
@@ -167,6 +164,21 @@ func (s *Service) lookupHost(ctx context.Context, host string, extraHosts []stri
 	return nil, ErrNotFound
 }
 
+// maxTextBytes caps the stored page text. Real imprint pages are 5–30 KB of markdown; the cap
+// protects Redis and the callers from pathological pages.
+const maxTextBytes = 256 << 10
+
+// truncateUTF8 cuts s to at most n bytes without splitting a UTF-8 sequence.
+func truncateUTF8(s string, n int) (string, bool) {
+	if len(s) <= n {
+		return s, false
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n], true
+}
+
 // hardFailure: errors that say nothing about the candidate page and must abort the lookup.
 func hardFailure(err error) bool {
 	return !errors.Is(err, crawler.ErrUpstream) || errors.Is(err, crawler.ErrUpstreamTimeout) || errors.Is(err, crawler.ErrRateLimited)
@@ -190,16 +202,23 @@ func unusableReason(x Extraction) string {
 
 func build(x Extraction, c Candidate, hosts []string) *Imprint {
 	imp := &Imprint{ImprintURL: x.URL, Fields: x.Fields, Text: x.Text}
+	var truncated bool
+	imp.Text, truncated = truncateUTF8(imp.Text, maxTextBytes)
 	if imp.ImprintURL == "" {
 		imp.ImprintURL = c.URL
 	}
 	if imp.RepresentedBy == nil {
 		imp.RepresentedBy = []string{}
 	}
-	imp.Warnings = append([]string{}, x.Warnings...)
-	imp.Warnings = append(imp.Warnings, Validate(&imp.Fields, imp.Text)...)
+	imp.Warnings = append([]Warning{}, x.Warnings...)
+	imp.Warnings = append(imp.Warnings, Validate(&imp.Fields, x.Text)...) // validate against the full text
+	if truncated {
+		imp.Warnings = append(imp.Warnings, Warning{Code: WarnTextTruncated, Field: "text",
+			Message: fmt.Sprintf("the page text had %d bytes and was cut to %d", len(x.Text), maxTextBytes)})
+	}
 	if u, err := url.Parse(imp.ImprintURL); err == nil && !related(u.Hostname(), hosts) {
-		imp.Warnings = append(imp.Warnings, fmt.Sprintf("imprint page is hosted on a different host (%s)", u.Hostname()))
+		imp.Warnings = append(imp.Warnings, Warning{Code: WarnExternalHost, Field: "imprint_url",
+			Message: fmt.Sprintf("imprint page is hosted on a different host (%s)", u.Hostname())})
 	}
 	return imp
 }

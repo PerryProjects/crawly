@@ -146,6 +146,7 @@ type TTLConfig struct {
 	BrandOK   time.Duration `mapstructure:"brand_ok"`
 	NotFound  time.Duration `mapstructure:"not_found"`
 	Error     time.Duration `mapstructure:"error"`
+	Partial   time.Duration `mapstructure:"partial"` // degraded ok results, e.g. LLM extraction failed
 }
 
 // LockExpiry is the redsync mutex expiry: the load deadline plus a margin.
@@ -206,6 +207,7 @@ func Default() Config {
 				BrandOK:   30 * 24 * time.Hour,
 				NotFound:  24 * time.Hour,
 				Error:     5 * time.Minute,
+				Partial:   time.Hour,
 			},
 			RefreshEnabled: false,
 			RefreshCool:    time.Hour,
@@ -352,6 +354,7 @@ func (c *Config) Validate() error {
 		"cache.ttl.brand_ok":         c.Cache.TTL.BrandOK,
 		"cache.ttl.not_found":        c.Cache.TTL.NotFound,
 		"cache.ttl.error":            c.Cache.TTL.Error,
+		"cache.ttl.partial":          c.Cache.TTL.Partial,
 		"cache.refresh_cooldown":     c.Cache.RefreshCool,
 	} {
 		if d <= 0 {

@@ -18,7 +18,7 @@ type Extraction struct {
 	StatusCode int    // target site status, 0 if unknown
 	Text       string // raw markdown
 	Fields     Fields
-	Warnings   []string // problems with the structured part (page text is still usable)
+	Warnings   []Warning // problems with the structured part (page text is still usable)
 }
 
 // Extractor turns one imprint page into text plus structured fields.
@@ -60,7 +60,7 @@ func (e *FirecrawlExtractor) Extract(ctx context.Context, pageURL string) (Extra
 		return Extraction{}, fmt.Errorf("imprint: extract %s: %w", pageURL, err)
 	}
 	if page.JSON == nil {
-		x.Warnings = append(x.Warnings, "structured extraction returned no data")
+		x.Warnings = append(x.Warnings, Warning{Code: WarnExtractionUnavailable, Message: "structured extraction returned no data"})
 		return x, nil
 	}
 	x.Fields = FieldsFromMap(page.JSON)
@@ -76,7 +76,8 @@ Rules:
 - legal_form is the legal form of the operator (e.g. GmbH, AG, UG, e.U., Einzelunternehmen) if stated.
 - register.type is the register abbreviation as written (e.g. HRB, HRA, GnR, PR, VR, FN); register.court is the register court.
 - country is the ISO code DE, AT or CH of the operator's address, only if clearly stated.
-- responsible_for_content is the person named as responsible for content (V.i.S.d.P. / § 18 MStV / Medieninhaber).`
+- responsible_for_content is the person or organization named as responsible for the content (V.i.S.d.P., § 18 MStV, "verantwortlich für den Inhalt", Medieninhaber).
+- Copy an e-mail address exactly as written, even if it is obfuscated like "name [at] example.de".`
 
 // extractionSchema returns the JSON schema sent to Firecrawl. All fields are nullable.
 func extractionSchema() map[string]any {

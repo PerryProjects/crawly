@@ -75,9 +75,12 @@ func TestRetryAndErrorMapping(t *testing.T) {
 		{"429 forever gives up after max retries", []error{rateLimit(), rateLimit(), rateLimit(), nil}, 3, ErrRateLimited, []string{"rate_limited", "rate_limited", "rate_limited"}},
 		{"503 forever", []error{httpErr(503), httpErr(503), httpErr(503)}, 3, ErrUpstream, []string{"error", "error", "error"}},
 		{"400 is not retried", []error{httpErr(400)}, 1, ErrUpstream, []string{"error"}},
-		{"401 is not retried", []error{&firecrawl.AuthenticationError{FirecrawlError: firecrawl.FirecrawlError{StatusCode: 401}}}, 1, ErrUpstream, []string{"error"}},
 		{"200 success:false is not retried", []error{&firecrawl.FirecrawlError{StatusCode: 200, ErrorCode: "SCRAPE_DNS_RESOLUTION_ERROR"}}, 1, ErrUpstream, []string{"error"}},
 		{"timeout is not retried", []error{context.DeadlineExceeded}, 1, ErrUpstreamTimeout, []string{"timeout"}},
+		{"401 is an account error", []error{&firecrawl.AuthenticationError{FirecrawlError: firecrawl.FirecrawlError{StatusCode: 401}}}, 1, ErrUpstreamUnavailable, []string{"account_error"}},
+		{"402 no credits is an account error", []error{httpErr(http.StatusPaymentRequired)}, 1, ErrUpstreamUnavailable, []string{"account_error"}},
+		{"pending terms is an account error", []error{&firecrawl.FirecrawlError{StatusCode: 403, RequiresAction: &firecrawl.RequiresAction{Type: "accept_terms"}}}, 1, ErrUpstreamUnavailable, []string{"account_error"}},
+		{"403 without action is site specific", []error{httpErr(http.StatusForbidden)}, 1, ErrUpstream, []string{"error"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -366,6 +369,9 @@ func TestSDK5xxBecomesErrUpstream(t *testing.T) {
 }
 
 func TestErrorCode(t *testing.T) {
+	if ErrorCode(ErrUpstreamUnavailable) != CodeUnavailable || errors.Is(ErrUpstreamUnavailable, ErrUpstream) {
+		t.Fatal("account errors must not count as site failures")
+	}
 	if ErrorCode(ErrRateLimited) != CodeRateLimited || ErrorCode(ErrUpstream) != CodeUpstream || ErrorCode(errors.New("x")) != "" {
 		t.Fatal("codes")
 	}
@@ -383,5 +389,28 @@ func TestNoLocationByDefault(t *testing.T) {
 	}
 	if _, ok := body["location"]; ok {
 		t.Errorf("location must be absent unless configured: %v", body["location"])
+	}
+}
+
+func TestFreshContextBypassesFirecrawlCache(t *testing.T) {
+	var bodies []map[string]any
+	c := newSDKClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		bodies = append(bodies, body)
+		_, _ = io.WriteString(w, `{"success":true,"data":{"markdown":"x"}}`)
+	})
+	if _, err := c.Scrape(WithFresh(context.Background()), "https://example.de/", ScrapeRequest{Markdown: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Scrape(context.Background(), "https://example.de/", ScrapeRequest{Markdown: true}); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := bodies[0]["maxAge"]; !ok || v != float64(0) {
+		t.Errorf("fresh call: maxAge = %v (present %v), want 0", v, ok)
+	}
+	if _, ok := bodies[1]["maxAge"]; ok {
+		t.Errorf("normal calls leave Firecrawl's default max age: %v", bodies[1]["maxAge"])
 	}
 }

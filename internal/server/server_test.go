@@ -49,11 +49,11 @@ func (f *fakeLoader) Load(ctx context.Context, key cache.Key, fetch cache.FetchF
 	if entry != nil {
 		return *entry, nil
 	}
-	data, ferr := fetch(ctx)
+	fetched, ferr := fetch(ctx)
 	if ferr != nil {
 		return cache.Entry{}, ferr
 	}
-	return cache.Entry{Envelope: cache.Envelope{SchemaVersion: 1, Status: cache.StatusOK, FetchedAt: time.Unix(1700000000, 0).UTC(), Data: data}}, nil
+	return cache.Entry{Envelope: cache.Envelope{SchemaVersion: 1, Status: cache.StatusOK, FetchedAt: time.Unix(1700000000, 0).UTC(), Data: fetched.Data, Partial: fetched.Partial}}, nil
 }
 
 type fakeLookups struct {
@@ -87,7 +87,7 @@ func sampleImprint() *imprint.Imprint {
 		ImprintURL: "https://acme.de/impressum",
 		Fields:     imprint.Fields{CompanyName: strp("ACME GmbH"), RepresentedBy: []string{"Max Mustermann"}, Country: strp("DE")},
 		Text:       "# Impressum\nACME GmbH",
-		Warnings:   []string{},
+		Warnings:   []imprint.Warning{},
 	}
 }
 
@@ -279,6 +279,7 @@ func TestErrorMapping(t *testing.T) {
 		{"upstream timeout", fmt.Errorf("x: %w", crawler.ErrUpstreamTimeout), 504, "timeout", false},
 		{"deadline", fmt.Errorf("x: %w", context.DeadlineExceeded), 504, "timeout", false},
 		{"rate limited", fmt.Errorf("x: %w", crawler.ErrRateLimited), 503, "upstream_rate_limited", true},
+		{"firecrawl account problem", fmt.Errorf("x: %w", crawler.ErrUpstreamUnavailable), 503, "upstream_unavailable", true},
 		{"lock timeout", fmt.Errorf("x: %w", cache.ErrLockTimeout), 503, "unavailable", true},
 		{"redis down", fmt.Errorf("x: %w", cache.ErrStoreUnavailable), 503, "unavailable", true},
 		{"load shed", fmt.Errorf("x: %w", cache.ErrOverloaded), 503, "overloaded", true},

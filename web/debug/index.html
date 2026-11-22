@@ -145,7 +145,7 @@
         <!-- Ergebnis: Impressum -->
         <template v-if="route === 'crawler' && r.kind === 'imprint' && r.res.ok">
           <div class="warnings" v-if="r.res.json.warnings && r.res.json.warnings.length">
-            <div v-for="w in r.res.json.warnings" :key="w">⚠ {{ w }}</div>
+            <div v-for="(w, i) in r.res.json.warnings" :key="i">⚠ <code>{{ w.code }}</code> <b v-if="w.field">{{ w.field }}</b> {{ w.message }}</div>
           </div>
           <table>
             <tr v-for="row in imprintRows(r.res.json)" :key="row[0]"><th>{{ row[0] }}</th>
@@ -158,6 +158,9 @@
 
         <!-- Ergebnis: Brand -->
         <template v-if="route === 'crawler' && r.kind === 'brand' && r.res.ok">
+          <div class="warnings" v-if="r.res.json.warnings && r.res.json.warnings.length">
+            <div v-for="(w, i) in r.res.json.warnings" :key="i">⚠ <code>{{ w.code }}</code> {{ w.message }}</div>
+          </div>
           <div>
             <span class="imgbox" v-for="img in brandImages(r.res.json)" :key="img[0]">
               <img :src="img[1]" :alt="img[0]"><small>{{ img[0] }}</small></span>

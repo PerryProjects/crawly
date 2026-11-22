@@ -15,7 +15,7 @@ const (
 
 // keyVersion is part of every Redis key so an incompatible schema change can
 // roll out under a new key space instead of migrating data.
-const keyVersion = "v1"
+const keyVersion = "v2"
 
 // Key addresses one cached entry. All keys of a host share the Redis Cluster
 // hash tag "{host}", so cache, lock and cooldown keys land in the same slot.
@@ -24,7 +24,7 @@ type Key struct {
 	Host string
 }
 
-// Cache is the Redis key holding the envelope, e.g. "imprint:v1:{example.de}".
+// Cache is the Redis key holding the envelope, e.g. "imprint:v2:{example.de}".
 func (k Key) Cache() string { return fmt.Sprintf("%s:%s:{%s}", k.Kind, keyVersion, k.Host) }
 
 // Lock is the redsync mutex key.

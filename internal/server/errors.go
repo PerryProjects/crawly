@@ -86,6 +86,8 @@ func mapError(err error) apiError {
 		return apiError{status: http.StatusServiceUnavailable, code: codeUnavailable, message: "service is busy or shutting down, retry later", retryAfter: true}
 	case errors.Is(err, crawler.ErrRateLimited):
 		return fromCode(crawler.CodeRateLimited)
+	case errors.Is(err, crawler.ErrUpstreamUnavailable):
+		return fromCode(crawler.CodeUnavailable)
 	case errors.Is(err, crawler.ErrUpstreamTimeout), errors.Is(err, context.DeadlineExceeded):
 		return fromCode(crawler.CodeTimeout)
 	case errors.Is(err, crawler.ErrUpstream):
@@ -110,6 +112,8 @@ func fromCode(code string) apiError {
 	switch code {
 	case crawler.CodeTimeout:
 		return apiError{status: http.StatusGatewayTimeout, code: codeTimeout, message: "the upstream crawler timed out"}
+	case crawler.CodeUnavailable:
+		return apiError{status: http.StatusServiceUnavailable, code: crawler.CodeUnavailable, message: "the upstream crawler refused this service's account (API key, credits); this is not a problem of the website", retryAfter: true}
 	case crawler.CodeRateLimited:
 		return apiError{status: http.StatusServiceUnavailable, code: codeRateLimited, message: "the upstream crawler is rate limited, retry later", retryAfter: true}
 	default:

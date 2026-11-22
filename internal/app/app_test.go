@@ -32,6 +32,7 @@ func TestClassify(t *testing.T) {
 		{"not found", fmt.Errorf("x: %w", imprint.ErrNotFound), cache.Verdict{Status: cache.StatusNotFound, Code: "not_found"}},
 		{"upstream", fmt.Errorf("x: %w", crawler.ErrUpstream), cache.Verdict{Status: cache.StatusError, Code: "upstream_error"}},
 		{"upstream timeout", fmt.Errorf("x: %w", crawler.ErrUpstreamTimeout), cache.Verdict{Status: cache.StatusError, Code: "upstream_timeout"}},
+		{"account problem is never cached", fmt.Errorf("x: %w", crawler.ErrUpstreamUnavailable), cache.Verdict{}},
 		{"rate limited is never cached", fmt.Errorf("x: %w", crawler.ErrRateLimited), cache.Verdict{}},
 		{"load deadline is never cached", context.DeadlineExceeded, cache.Verdict{}},
 		{"cancellation is never cached", context.Canceled, cache.Verdict{}},
@@ -171,7 +172,7 @@ func TestEndToEndAndGracefulShutdown(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run did not return")
 	}
-	if !mr.Exists("imprint:v1:{acme.de}") {
+	if !mr.Exists("imprint:v2:{acme.de}") {
 		t.Fatal("result was not cached")
 	}
 	if _, err := http.Get(base + "/healthz"); err == nil {

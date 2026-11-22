@@ -10,6 +10,7 @@ import (
 
 	"github.com/OWNER/siteinfo/internal/brand"
 	"github.com/OWNER/siteinfo/internal/cache"
+	"github.com/OWNER/siteinfo/internal/crawler"
 	"github.com/OWNER/siteinfo/internal/imprint"
 	"github.com/OWNER/siteinfo/internal/observability"
 	"github.com/OWNER/siteinfo/internal/urlnorm"
@@ -84,6 +85,9 @@ func serve[T any](s *Server, c *echo.Context, kind cache.Kind, notFound error,
 	ctx, cancel := context.WithTimeout(c.Request().Context(), s.handlerTimeout)
 	defer cancel()
 	ctx = dbg.withTrace(ctx)
+	if refresh {
+		ctx = crawler.WithFresh(ctx) // also bypass Firecrawl's own cache
+	}
 
 	key := cache.Key{Kind: kind, Host: host}
 	res, err := cache.GetOrLoad(ctx, s.loader, key, cache.LoadOptions{Refresh: refresh}, func(ctx context.Context) (T, error) {

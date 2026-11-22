@@ -124,9 +124,19 @@ func NewSDK(apiKey, apiURL string) (*firecrawl.Client, error) {
 	return cl, nil
 }
 
+type freshKey struct{}
+
+// WithFresh marks ctx so that Firecrawl calls made with it bypass Firecrawl's own result
+// cache (maxAge 0). Used for refresh=true; otherwise Firecrawl may answer with a copy up to
+// its default max age old, even though our cache was bypassed.
+func WithFresh(ctx context.Context) context.Context { return context.WithValue(ctx, freshKey{}, true) }
+
 // Scrape implements Crawler.
 func (c *Client) Scrape(ctx context.Context, url string, req ScrapeRequest) (*Page, error) {
 	opts := c.options(req)
+	if fresh, _ := ctx.Value(freshKey{}).(bool); fresh {
+		opts.MaxAge = firecrawl.Int64(0)
+	}
 	for attempt := 0; ; attempt++ {
 		doc, retryAfter, err := c.attempt(ctx, url, opts, attempt+1, req)
 		if err == nil {
@@ -173,6 +183,9 @@ func (c *Client) attempt(ctx context.Context, url string, opts *firecrawl.Scrape
 	doc, err := c.sc.Scrape(callCtx, url, opts)
 	outcome, err := classify(ctx, err)
 	c.obs.UpstreamCall(outcome)
+	if errors.Is(err, ErrUpstreamUnavailable) {
+		c.log.Errorw("firecrawl refused the account: check API key, remaining credits and pending terms", "error", err)
+	}
 	tr.Add("crawler", "firecrawl call", "url", url, "attempt", n, "outcome", outcome, "duration", time.Since(callStart),
 		"queue_wait", waited, "formats", describeRequest(req), "retry_after", box.get(), "error", err)
 	return doc, box.get(), err
@@ -219,8 +232,12 @@ func classify(parent context.Context, err error) (outcome string, _ error) {
 		return "canceled", parent.Err()
 	}
 	var rl *firecrawl.RateLimitError
+	var auth *firecrawl.AuthenticationError
+	var fe *firecrawl.FirecrawlError
 	var netErr net.Error
 	switch {
+	case errors.As(err, &auth), errors.As(err, &fe) && (fe.StatusCode == http.StatusPaymentRequired || fe.RequiresAction != nil):
+		return "account_error", fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
 	case errors.As(err, &rl):
 		return "rate_limited", fmt.Errorf("%w: %w", ErrRateLimited, err)
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():

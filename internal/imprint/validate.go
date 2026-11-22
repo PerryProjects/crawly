@@ -42,40 +42,54 @@ var registerTypes = map[string]struct{ canonical, country string }{
 // spelling, country code) and returns warnings. text is the raw page text used
 // for the grounding check: values the model reports but that do not occur in
 // the page are flagged as possible hallucinations.
-func Validate(f *Fields, text string) []string {
-	var w []string
-	warn := func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }
+func Validate(f *Fields, text string) []Warning {
+	var w []Warning
+	warn := func(code, field, format string, args ...any) {
+		w = append(w, Warning{Code: code, Field: field, Message: fmt.Sprintf(format, args...)})
+	}
 
 	// Country: normalize to DE/AT/CH; anything else is flagged and dropped.
 	if f.Country != nil {
 		if c := normalizeCountry(*f.Country); c != "" {
 			f.Country = &c
 		} else {
-			warn("country %q is not DE, AT or CH; this service only covers DACH", *f.Country)
+			warn(WarnNotDACH, "country", "country %q is not DE, AT or CH; this service only covers DACH", *f.Country)
 			f.Country = nil
 		}
 	}
 	country := effectiveCountry(f)
+	if f.LegalForm != nil {
+		if canon, ok := legalForms[strings.ToLower(*f.LegalForm)]; ok && canon != *f.LegalForm {
+			f.LegalForm = &canon
+		}
+	}
 
 	if f.CompanyName == nil {
-		warn("company_name not found")
+		warn(WarnMissing, "company_name", "company_name not found")
 	} else if !grounded(text, *f.CompanyName) {
-		warn("company_name not found verbatim in the imprint text")
+		warn(WarnUnverified, "company_name", "company_name not found verbatim in the imprint text")
 	}
 	if f.Address == nil {
-		warn("postal address not found")
+		warn(WarnMissing, "address", "postal address not found")
 	}
 
 	validateVAT(f, text, country, warn)
 	validateRegister(f, text, country, warn)
 
 	if f.Contact != nil {
-		if f.Contact.Email != nil {
-			if !validEmail(*f.Contact.Email) {
-				warn("contact.email %q is not a valid single email address, value removed", *f.Contact.Email)
+		if e := f.Contact.Email; e != nil {
+			// Grounding is checked on the value as written on the page, before any normalization.
+			plain, deobfuscated := deobfuscateEmail(*e)
+			switch {
+			case !grounded(text, *e):
+				warn(WarnUnverifiedRemoved, "contact.email", "contact.email not found verbatim in the imprint text, value removed")
 				f.Contact.Email = nil
-			} else if !grounded(text, *f.Contact.Email) {
-				warn("contact.email not found verbatim in the imprint text, value removed")
+			case validEmail(*e):
+			case deobfuscated && validEmail(plain):
+				warn(WarnNormalized, "contact.email", "contact.email was written obfuscated on the page (%q) and has been normalized", *e)
+				f.Contact.Email = &plain
+			default:
+				warn(WarnInvalidRemoved, "contact.email", "contact.email %q is not a valid single email address, value removed", *e)
 				f.Contact.Email = nil
 			}
 		}
@@ -87,11 +101,11 @@ func Validate(f *Fields, text string) []string {
 		pc := *f.Address.PostalCode
 		switch {
 		case country == "DE" && !rePostalDE.MatchString(pc):
-			warn("address.postal_code %q is not a 5-digit German postal code", pc)
+			warn(WarnInvalidFormat, "address.postal_code", "address.postal_code %q is not a 5-digit German postal code", pc)
 		case (country == "AT" || country == "CH") && !rePostal4.MatchString(pc):
-			warn("address.postal_code %q is not a 4-digit %s postal code", pc, country)
+			warn(WarnInvalidFormat, "address.postal_code", "address.postal_code %q is not a 4-digit %s postal code", pc, country)
 		case !grounded(text, pc):
-			warn("address.postal_code not found in the imprint text")
+			warn(WarnUnverified, "address.postal_code", "address.postal_code not found in the imprint text")
 		}
 	}
 	return w
@@ -120,7 +134,7 @@ func effectiveCountry(f *Fields) string {
 	return ""
 }
 
-func validateVAT(f *Fields, text, country string, warn func(string, ...any)) {
+func validateVAT(f *Fields, text, country string, warn func(string, string, string, ...any)) {
 	if f.VATID == nil {
 		return
 	}
@@ -137,15 +151,15 @@ func validateVAT(f *Fields, text, country string, warn func(string, ...any)) {
 			v = strings.TrimSuffix(v, m[1]) + " " + m[1]
 		}
 	default:
-		warn("vat_id %q does not match the DE (DE+9 digits), AT (ATU+8 digits) or CH (CHE-123.456.789) format", *f.VATID)
+		warn(WarnInvalidFormat, "vat_id", "vat_id %q does not match the DE (DE+9 digits), AT (ATU+8 digits) or CH (CHE-123.456.789) format", *f.VATID)
 		return
 	}
 	f.VATID = &v
 	if country != "" && vatCountry != country {
-		warn("vat_id has a %s format but the imprint country is %s", vatCountry, country)
+		warn(WarnCountryMismatch, "vat_id", "vat_id has a %s format but the imprint country is %s", vatCountry, country)
 	}
 	if !grounded(text, v) {
-		warn("vat_id not found verbatim in the imprint text, value removed")
+		warn(WarnUnverifiedRemoved, "vat_id", "vat_id not found verbatim in the imprint text, value removed")
 		f.VATID = nil
 	}
 }
@@ -153,14 +167,14 @@ func validateVAT(f *Fields, text, country string, warn func(string, ...any)) {
 // dropUngrounded removes identifiers that the model reports but that do not occur in the
 // page. Prompt rule: these are copied exactly, so a value that is not on the page was
 // invented (observed live: an e-mail address composed from the shop's domain).
-func dropUngrounded(text, name string, v **string, warn func(string, ...any)) {
+func dropUngrounded(text, name string, v **string, warn func(string, string, string, ...any)) {
 	if *v != nil && !grounded(text, **v) {
-		warn("%s not found verbatim in the imprint text, value removed", name)
+		warn(WarnUnverifiedRemoved, name, "%s not found verbatim in the imprint text, value removed", name)
 		*v = nil
 	}
 }
 
-func validateRegister(f *Fields, text, country string, warn func(string, ...any)) {
+func validateRegister(f *Fields, text, country string, warn func(string, string, string, ...any)) {
 	r := f.Register
 	if r == nil {
 		return
@@ -184,11 +198,11 @@ func validateRegister(f *Fields, text, country string, warn func(string, ...any)
 			c := typ.canonical
 			r.Type = &c
 		} else if country == "DE" || country == "AT" {
-			warn("register.type %q is not a known %s register type", *r.Type, country)
+			warn(WarnInvalidFormat, "register.type", "register.type %q is not a known %s register type", *r.Type, country)
 		}
 	}
 	if known && country != "" && country != "CH" && typ.country != country {
-		warn("register.type %s belongs to %s but the imprint country is %s", typ.canonical, typ.country, country)
+		warn(WarnCountryMismatch, "register.type", "register.type %s belongs to %s but the imprint country is %s", typ.canonical, typ.country, country)
 	}
 	if r.Number == nil {
 		return
@@ -198,21 +212,49 @@ func validateRegister(f *Fields, text, country string, warn func(string, ...any)
 	switch {
 	case known && typ.country == "AT", !known && country == "AT":
 		if !reRegAT.MatchString(strings.TrimSpace(num)) {
-			warn("register.number %q is not a valid Firmenbuch number (digits plus a letter, e.g. 123456a)", *r.Number)
+			warn(WarnInvalidFormat, "register.number", "register.number %q is not a valid Firmenbuch number (digits plus a letter, e.g. 123456a)", *r.Number)
 		}
 	case known && typ.country == "DE", !known && country == "DE":
 		if !reRegDE.MatchString(strings.TrimSpace(num)) {
-			warn("register.number %q is not a valid German register number", *r.Number)
+			warn(WarnInvalidFormat, "register.number", "register.number %q is not a valid German register number", *r.Number)
 		}
 	}
 	if !known && r.Type == nil {
-		warn("register.number present without register.type")
+		warn(WarnMissing, "register.type", "register.number present without register.type")
 	}
 	dropUngrounded(text, "register.number", &r.Number, warn)
 	if *r == (Register{}) {
 		f.Register = nil
 	}
 }
+
+var (
+	reObfAt  = regexp.MustCompile(`(?i)\s*[\[({<]\s*(?:at|ät|@)\s*[\])}>]\s*`)
+	reObfDot = regexp.MustCompile(`(?i)\s*[\[({<]\s*(?:dot|punkt|\.)\s*[\])}>]\s*`)
+)
+
+// deobfuscateEmail turns the common anti-spam spellings "name [at] example [dot] de" and
+// "name (at) example.de" into a plain address. Only bracketed tokens are replaced, never a bare
+// "at", so ordinary text cannot be turned into an address. It reports whether anything changed.
+func deobfuscateEmail(s string) (string, bool) {
+	out := reObfDot.ReplaceAllString(reObfAt.ReplaceAllString(s, "@"), ".")
+	out = strings.TrimSpace(out)
+	return out, out != strings.TrimSpace(s)
+}
+
+// legalForms maps the lower-cased spelling of common DACH legal forms to their canonical
+// spelling. Only the letter case is changed, and only for exact matches.
+var legalForms = func() map[string]string {
+	m := map[string]string{}
+	for _, f := range []string{
+		"GmbH", "gGmbH", "UG", "UG (haftungsbeschränkt)", "AG", "SE", "KG", "OHG", "GbR", "KGaA", "eG", "e.K.", "e.V.",
+		"GmbH & Co. KG", "AG & Co. KG", "UG (haftungsbeschränkt) & Co. KG", "PartG", "PartG mbB", "Einzelunternehmen",
+		"e.U.", "OG", "SA", "Sàrl", "Sagl", "Genossenschaft", "Stiftung",
+	} {
+		m[strings.ToLower(f)] = f
+	}
+	return m
+}()
 
 // validEmail accepts exactly one plain address (no display name) with a dotted domain.
 func validEmail(s string) bool {

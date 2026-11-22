@@ -14,6 +14,12 @@ type Loader interface {
 	Load(ctx context.Context, key Key, fetch FetchFunc, opt LoadOptions) (Entry, error)
 }
 
+// PartialResult is implemented by cached types that can be degraded. A partial result is
+// served normally but cached only for TTLs.Partial.
+type PartialResult interface {
+	PartialResult() bool
+}
+
 // Result is the typed outcome of GetOrLoad.
 type Result[T any] struct {
 	Data             T // zero unless Status == StatusOK
@@ -32,16 +38,17 @@ type Result[T any] struct {
 // error; a cached failure yields *CachedError; a fresh failure yields the
 // fetch error itself.
 func GetOrLoad[T any](ctx context.Context, l Loader, key Key, opt LoadOptions, fetch func(context.Context) (T, error)) (Result[T], error) {
-	entry, err := l.Load(ctx, key, func(ctx context.Context) (json.RawMessage, error) {
+	entry, err := l.Load(ctx, key, func(ctx context.Context) (Fetched, error) {
 		v, err := fetch(ctx)
 		if err != nil {
-			return nil, err
+			return Fetched{}, err
 		}
 		b, err := json.Marshal(v)
 		if err != nil {
-			return nil, fmt.Errorf("cache: encode %s data: %w", key.Kind, err)
+			return Fetched{}, fmt.Errorf("cache: encode %s data: %w", key.Kind, err)
 		}
-		return b, nil
+		p, ok := any(v).(PartialResult)
+		return Fetched{Data: b, Partial: ok && p.PartialResult()}, nil
 	}, opt)
 
 	res := Result[T]{Status: entry.Status, FetchedAt: entry.FetchedAt, Cached: entry.Cached, RefreshThrottled: entry.RefreshThrottled}

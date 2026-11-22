@@ -19,7 +19,7 @@ func TestImprintLogOutputHasNoPersonalData(t *testing.T) {
 			VATID:   s("DE123456789"), Country: s("DE"),
 		},
 		Text:     "Peter Schwabe, Brünerstr. 25",
-		Warnings: []string{"x", "y"},
+		Warnings: []Warning{{Code: "a"}, {Code: "b"}},
 	}
 	var buf bytes.Buffer
 	l := zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.AddSync(&buf), zapcore.InfoLevel))

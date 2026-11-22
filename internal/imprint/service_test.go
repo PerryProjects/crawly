@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/OWNER/siteinfo/internal/crawler"
 )
@@ -151,7 +152,7 @@ func TestLookupErrorPropagation(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
-	for name, cause := range map[string]error{"timeout": crawler.ErrUpstreamTimeout, "rate limit": crawler.ErrRateLimited, "canceled": context.Canceled} {
+	for name, cause := range map[string]error{"timeout": crawler.ErrUpstreamTimeout, "rate limit": crawler.ErrRateLimited, "account": crawler.ErrUpstreamUnavailable, "canceled": context.Canceled} {
 		t.Run("candidate "+name+" aborts the lookup", func(t *testing.T) {
 			site := &fakeSite{
 				pages: map[string]*crawler.Page{"https://acme.de/": {URL: "https://acme.de/"}},
@@ -172,7 +173,7 @@ func TestLookupHomepageErrorStatusIsUpstreamError(t *testing.T) {
 	for _, status := range []int{403, 404, 500, 503} {
 		site := &fakeSite{pages: map[string]*crawler.Page{"https://acme.de/": {URL: "https://acme.de/", StatusCode: status, Markdown: "[Impressum](/impressum)"}}}
 		_, err := newSvc(site).Lookup(context.Background(), "acme.de")
-		if !errors.Is(err, crawler.ErrUpstream) || errors.Is(err, ErrNotFound) || len(site.calls) != 1 {
+		if !errors.Is(err, crawler.ErrUpstream) || errors.Is(err, ErrNotFound) || len(site.calls) != 2 { // apex, then www
 			t.Fatalf("status %d: err=%v calls=%v", status, err, site.calls)
 		}
 	}
@@ -325,5 +326,36 @@ func TestExtractionOnlyRunsForAcceptedPages(t *testing.T) {
 	}
 	if count["https://acme.de/impressum"] != 1 || count["https://acme.de/imprint"] != 1 || count["https://acme.de/legal-notice"] != 2 {
 		t.Fatalf("calls per URL = %v", count)
+	}
+}
+
+func TestImprintPartialWhenExtractionFails(t *testing.T) {
+	page := imprintPage("https://acme.de/impressum")
+	page.JSON = nil
+	site := &fakeSite{pages: map[string]*crawler.Page{"https://acme.de/": {URL: "https://acme.de/"}, "https://acme.de/impressum": page}}
+	imp, err := newSvc(site).Lookup(context.Background(), "acme.de")
+	if err != nil || !imp.PartialResult() {
+		t.Fatalf("partial = %v, err = %v", imp.PartialResult(), err)
+	}
+	ok := imprintPage("https://acme.de/impressum")
+	site = &fakeSite{pages: map[string]*crawler.Page{"https://acme.de/": {URL: "https://acme.de/"}, "https://acme.de/impressum": ok}}
+	if imp, _ = newSvc(site).Lookup(context.Background(), "acme.de"); imp.PartialResult() {
+		t.Fatal("a complete result is not partial")
+	}
+}
+
+func TestHugeTextIsTruncated(t *testing.T) {
+	page := imprintPage("https://acme.de/impressum")
+	page.Markdown = imprintMD + "\n" + strings.Repeat("ä", maxTextBytes) // multi-byte runes across the cut
+	site := &fakeSite{pages: map[string]*crawler.Page{"https://acme.de/": {URL: "https://acme.de/"}, "https://acme.de/impressum": page}}
+	imp, err := newSvc(site).Lookup(context.Background(), "acme.de")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imp.Text) > maxTextBytes || !utf8.ValidString(imp.Text) || !hasWarning(imp.Warnings, WarnTextTruncated) {
+		t.Fatalf("len=%d valid=%v warnings=%+v", len(imp.Text), utf8.ValidString(imp.Text), imp.Warnings)
+	}
+	if imp.VATID == nil {
+		t.Error("validation must still see the full text")
 	}
 }

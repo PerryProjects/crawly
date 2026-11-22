@@ -171,3 +171,16 @@ func TestServiceLookup(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestBrandPartialWhenUpstreamPartsAreMissing(t *testing.T) {
+	full := &fakeScraper{page: fixturePage(t, map[string]any{"description": "x"})}
+	b, err := NewService(full).Lookup(context.Background(), "acme.de")
+	if err != nil || b.PartialResult() || len(b.Warnings) != 0 || b.Warnings == nil {
+		t.Fatalf("complete result: %+v %v", b.Warnings, err)
+	}
+	none := &fakeScraper{page: &crawler.Page{URL: "https://acme.de/", StatusCode: 200}}
+	b, err = NewService(none).Lookup(context.Background(), "acme.de")
+	if err != nil || !b.PartialResult() || len(b.Warnings) != 2 || b.Warnings[0].Code != WarnBrandingUnavailable {
+		t.Fatalf("degraded result: %+v %v", b.Warnings, err)
+	}
+}

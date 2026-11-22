@@ -75,15 +75,16 @@ option pattern is used only for optional settings (timeouts, logger, clock, TTLs
    its *own* `ctx.Done()`, so one caller disconnecting never fails the others.
 3. The load runs on `context.WithTimeout(context.WithoutCancel(ctx), loadTimeout)`: the crawl completes and fills
    the cache even if the leader's client is gone.
-4. **redsync mutex** `lock:<kind>:v1:{host}`, expiry = `load_timeout + lock_margin`, retries every 50–100 ms
+4. **redsync mutex** `lock:<kind>:v2:{host}`, expiry = `load_timeout + lock_margin`, retries every 50–100 ms
    (jittered) until the load deadline.
 5. **Double-check** the cache (another pod may have filled it while we waited), only then call upstream, `SET` with
    TTL, **unlock on a detached context**.
 6. Lock not acquired before the deadline → `ErrLockTimeout` → **503 + `Retry-After`**.
 
-Keys: `imprint:v1:{host}`, `brand:v1:{host}`, locks `lock:imprint:v1:{host}`, cooldown `cooldown:imprint:v1:{host}`.
+Keys: `imprint:v2:{host}`, `brand:v2:{host}`, locks `lock:imprint:v2:{host}`, cooldown `cooldown:imprint:v2:{host}`.
 The `{host}` hash tag keeps all keys of a host in one Redis Cluster slot (verified against a real 3-master cluster,
-see below). The `v1` segment lets a schema change roll out under a new key space.
+see below). The version segment lets a schema change roll out under a new key space: it is `v2` since warnings became
+structured objects (old `v1` entries are simply ignored and expire).
 
 Envelope (JSON): `schema_version`, `status` (`ok` | `not_found` | `error`), `fetched_at`, `data`, `error_code`.
 Undecodable or wrong-version entries are deleted and treated as a miss.
@@ -97,8 +98,12 @@ Undecodable or wrong-version entries are deleted and treated as a miss.
   another pod holds the lock for 35 s, we usually end up with a double-check hit instead of a crawl; if it holds it
   longer, the caller gets 503 and retries.
 - **Negative results are cached** so broken sites do not burn credits: `not_found` 24 h, `error` 5 min. Only
-  upstream failures and per-call timeouts are cached as `error`. Rate limiting (our account state), caller
-  cancellation, deadline expiry and Redis problems say nothing about the site and are *never* cached.
+  upstream failures and per-call timeouts are cached as `error`. Rate limiting and account problems (invalid API
+  key, no credits left: `upstream_unavailable`, 503), caller cancellation, deadline expiry and Redis problems say
+  nothing about the site and are *never* cached.
+- **Degraded results are cached briefly.** An imprint whose LLM extraction failed (only the text is usable) or a brand
+  without Firecrawl's branding payload is served, but cached for `cache.ttl.partial` (1 h) instead of 30 days, so a
+  transient upstream hiccup is not frozen for a month. `refresh=true` also bypasses Firecrawl's own result cache (`maxAge: 0`).
 - A failed forced refresh never overwrites a good entry (`error` envelopes are written with `SET NX`).
 - When the pod-local singleflight leader runs a forced refresh, followers that joined share its result.
 - If the Redis `SET` fails after a load, the result is still returned (logged + `siteinfo.cache.write.failures`).
@@ -112,7 +117,8 @@ consumed when the refresh starts, so a failed refresh also starts the cooldown (
 
 ## Imprint pipeline
 
-1. Scrape the homepage (`markdown` + `links`, full page so footer links survive).
+1. Scrape the homepage (`markdown` + `links`, full page so footer links survive). If the bare domain fails for site
+   reasons (no DNS record, error status), `https://www.<host>/` is tried once, because normalization strips `www.`.
 2. **Rank candidate links.** Match path or link text against `impressum`, `imprint`, `anbieterkennung`,
    `legal-notice`, `rechtliche-hinweise`, `offenlegung` (AT media law). Pure privacy/`datenschutz`/cookie links are
    excluded; a combined `impressum-datenschutz` page is kept with a penalty. Preference: same host (subdomains and
@@ -145,13 +151,20 @@ consumed when the refresh starts, so a failed refresh also starts the cooldown (
    | Register type | DE: `HRA HRB GnR PR VR` (case-normalized), AT: `FN`; type must belong to the country |
    | DE register number | `^\d{1,7}( ?[A-Z]{1,3})?$` (e.g. `12345 B`) |
    | AT Firmenbuch number | `^\d{1,7} ?[a-z]$` (e.g. `123456a`) |
-   | Email | exactly one plain address, dotted domain (`net/mail`); an invalid value is removed |
+   | Email | exactly one plain address, dotted domain (`net/mail`); bracketed obfuscation (`name [at] firma [dot] de`, `(at)`, `{ät}`) is rewritten to a plain address (`normalized` warning, never a bare "at"); an otherwise invalid value is removed |
    | Postal code | DE 5 digits, AT/CH 4 digits |
    | Country | normalized to DE/AT/CH; anything else is dropped with a warning |
    | Missing core data | warns when `company_name` or the address is absent |
    | **Grounding** | `company_name`, `email`, `vat_id`, register number and postal code must occur in the page text (case, whitespace and punctuation ignored); otherwise a "not found verbatim" warning. **For identifiers (e-mail, phone, fax, VAT ID, register number) the value is removed**, not just flagged: observed live, the LLM composed `info@<shop-domain>` for a page without any e-mail address. Company name and postal code are only flagged |
 
-   Valid VAT IDs are normalized (whitespace removed). Nothing else is rewritten.
+   Valid VAT IDs are normalized (whitespace removed), known legal forms get their canonical case (`gmbh` → `GmbH`,
+   exact matches only), register numbers lose a glued-on type prefix (`HRB 104144` → `104144`). Nothing else is rewritten.
+   The stored `text` is capped at 256 KiB (`text_truncated` warning); validation still sees the full page.
+
+   **Warnings are objects** with a stable `code`, the affected `field` and a human `message`, so a caller can
+   highlight fields for review: `missing`, `invalid_format`, `invalid_removed`, `unverified`, `unverified_removed`,
+   `country_mismatch`, `not_dach`, `normalized`, `extraction_unavailable`, `parent_domain`, `external_host`,
+   `text_truncated` (brand: `branding_unavailable`, `extraction_unavailable`).
 7. Response adds `imprint_url`, `fetched_at`, `cached`.
 
 > **The LLM extraction may be wrong. The raw `text` (the page markdown) is the legally authoritative part of the
@@ -196,7 +209,9 @@ X-Request-Id: 3f9c1d2a7b6e5f40
   "responsible_for_content": null,
   "country": "DE",
   "text": "# Impressum\n\nBeispiel GmbH ...",
-  "warnings": [],
+  "warnings": [
+    {"code": "normalized", "field": "contact.email", "message": "contact.email was written obfuscated on the page (\"info [at] example.de\") and has been normalized"}
+  ],
   "fetched_at": "2026-11-22T17:15:35Z",
   "cached": false
 }
@@ -217,7 +232,7 @@ curl -s localhost:8080/healthz ; curl -s localhost:8080/readyz
 | 404 | no imprint found (`imprint_not_found`, negative-cached, `X-Cache` set) |
 | 422 | invalid URL (`invalid_url`) or malformed parameter (`invalid_parameter`) |
 | 502 | upstream error for this site (`upstream_error`, cached 5 min) |
-| 503 | overloaded (`overloaded`: in-flight cap or load admission), lock timeout, Redis down, shutting down, or upstream rate limit — with `Retry-After` |
+| 503 | overloaded (`overloaded`: in-flight cap or load admission), lock timeout, Redis down, shutting down, upstream rate limit, or Firecrawl refusing our account (`upstream_unavailable`: API key, credits) — with `Retry-After` |
 | 504 | upstream or handler timeout (`timeout`) |
 | 499 | client closed the request (non-standard, for log/metric clarity only) |
 
@@ -269,6 +284,7 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | `cache.ttl.imprint_ok` / `brand_ok` | `SITEINFO_CACHE_TTL_IMPRINT_OK` / `…_BRAND_OK` | `720h` | 30 d |
 | `cache.ttl.not_found` | `SITEINFO_CACHE_TTL_NOT_FOUND` | `24h` | |
 | `cache.ttl.error` | `SITEINFO_CACHE_TTL_ERROR` | `5m` | |
+| `cache.ttl.partial` | `SITEINFO_CACHE_TTL_PARTIAL` | `1h` | degraded ok results (LLM extraction or branding missing) |
 | `cache.refresh_enabled` | `SITEINFO_CACHE_REFRESH_ENABLED` | `false` | allow `refresh=true` |
 | `cache.refresh_cooldown` | `SITEINFO_CACHE_REFRESH_COOLDOWN` | `1h` | per key |
 | `protect.ip_rate` / `ip_burst` | `SITEINFO_PROTECT_IP_RATE` / `…_IP_BURST` | `50` / `100` | requests/s per client IP (IPv6 per /64), `0` = off |
@@ -440,9 +456,10 @@ turns them on.
   some errors (no checksum verification, no registry lookup). The raw `text` is authoritative.
 - **DACH only by prompt and validators, not by TLD.** `.com` sites of German companies must work, so there is no
   TLD allow-list; non-DACH results get a country warning.
-- **Personal data.** Imprints of sole proprietors contain personal data (names, addresses, phone numbers). They
-  live in Redis for up to the TTL (30 days) and are returned to callers; apply your own retention and legal basis.
-  Logs contain the host, not the data.
+- **Personal data.** Imprints of sole proprietors contain personal data (names, addresses, phone numbers). Storing it
+  is intended: the operator confirmed that customers keep working with this data in the calling tool, which persists
+  it. Here it lives only in Redis for up to the TTL. Logs deliberately contain the host, never the imprint fields
+  (`imprint.Imprint` has a log marshaler that omits them).
 - **Imprint budget.** A load runs inside the 40 s load budget. Worst case (subdomain without imprint): homepage, 2 linked
   candidates, 3 probes, then the parent's homepage and 2 candidates; every candidate is one fast markdown call and only the
   accepted page gets the slow extraction. Slow sites may still end as 504 (not cached).
@@ -456,7 +473,7 @@ turns them on.
 - **TTL rationale.** 30 days: imprints and brand identity change rarely and every miss costs Firecrawl credits;
   24 h for `not_found` so a newly published imprint is found within a day while not re-probing every request;
   5 min for upstream errors: long enough to absorb retry storms against a broken site, short enough to recover
-  quickly from transient failures. Use `refresh=true` (if enabled) to force a reload.
+  quickly from transient failures; 1 h for degraded results. Use `refresh=true` (if enabled) to force a reload.
 - **Protection limits are per pod and in memory** (no shared counters): a client spreading requests over N pods gets
   N times the budget, and a restarted pod forgets its buckets. A Redis-backed limiter would fix that at the price of a
   Redis round trip on every request; edge limiting is the right place for strict global limits.

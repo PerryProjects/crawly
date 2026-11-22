@@ -55,6 +55,9 @@ type Classifier func(err error) Verdict
 // TTLs are the entry lifetimes.
 type TTLs struct {
 	ImprintOK, BrandOK, NotFound, Error time.Duration
+	// Partial is used for ok results the fetcher marked as degraded (e.g. the LLM extraction
+	// failed but the page text is there), so a transient upstream hiccup is not frozen for 30 days.
+	Partial time.Duration
 }
 
 // For returns the TTL for a kind/status pair.
@@ -72,9 +75,16 @@ func (t TTLs) For(kind Kind, s Status) time.Duration {
 	}
 }
 
-// FetchFunc produces the JSON data for a cache miss. Returning an error that
+// Fetched is the outcome of a successful fetch.
+type Fetched struct {
+	Data json.RawMessage
+	// Partial marks a degraded result: it is served, but cached only for TTLs.Partial.
+	Partial bool
+}
+
+// FetchFunc produces the data for a cache miss. Returning an error that
 // the Classifier maps to a Verdict negative-caches it.
-type FetchFunc func(ctx context.Context) (json.RawMessage, error)
+type FetchFunc func(ctx context.Context) (Fetched, error)
 
 // LoadOptions are per-call settings.
 type LoadOptions struct {
@@ -185,7 +195,7 @@ func NewStore(rdb redis.UniversalClient, opts ...Option) *Store {
 		unlockTimeout: 3 * time.Second,
 		ttls: TTLs{
 			ImprintOK: 30 * 24 * time.Hour, BrandOK: 30 * 24 * time.Hour,
-			NotFound: 24 * time.Hour, Error: 5 * time.Minute,
+			NotFound: 24 * time.Hour, Error: 5 * time.Minute, Partial: time.Hour,
 		},
 		classify: func(error) Verdict { return Verdict{} },
 		log:      zap.NewNop().Sugar(),
@@ -404,11 +414,11 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 
 	tr.Add("cache", "calling upstream", "load_timeout", s.loadTimeout.String())
 	fetchStart := time.Now()
-	data, ferr := fetch(ctx)
+	fetched, ferr := fetch(ctx)
 	tr.Add("cache", "upstream finished", "duration", time.Since(fetchStart), "error", ferr)
 	env := Envelope{SchemaVersion: SchemaVersion, FetchedAt: s.now().UTC()}
 	if ferr == nil {
-		env.Status, env.Data = StatusOK, data
+		env.Status, env.Data, env.Partial = StatusOK, fetched.Data, fetched.Partial
 	} else {
 		v := s.classify(ferr)
 		if v.Status == "" {
@@ -417,7 +427,7 @@ func (s *Store) lead(parent context.Context, key Key, fetch FetchFunc, forceFres
 		env.Status, env.ErrorCode = v.Status, v.Code
 	}
 	outcome = string(env.Status)
-	tr.Add("cache", "storing result", "status", string(env.Status), "ttl", s.ttls.For(key.Kind, env.Status).String(), "error_code", env.ErrorCode)
+	tr.Add("cache", "storing result", "status", string(env.Status), "partial", env.Partial, "ttl", s.ttl(key, env).String(), "error_code", env.ErrorCode)
 	s.store(ctx, key, env)
 
 	e := Entry{Envelope: env}
@@ -438,7 +448,7 @@ func (s *Store) store(ctx context.Context, key Key, env Envelope) {
 	// Detached from the load deadline: an expensive result is worth a short grace period.
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
 	defer cancel()
-	ttl := s.ttls.For(key.Kind, env.Status)
+	ttl := s.ttl(key, env)
 	if env.Status == StatusError {
 		// NX: a failed forced refresh must not overwrite a good entry.
 		err = s.rdb.SetNX(wctx, key.Cache(), b, ttl).Err()
@@ -449,6 +459,13 @@ func (s *Store) store(ctx context.Context, key Key, env Envelope) {
 		s.obs.CacheWriteFailed()
 		s.log.Errorw("writing cache entry failed", observability.Fields(ctx), "key", key.Cache(), "error", err)
 	}
+}
+
+func (s *Store) ttl(key Key, env Envelope) time.Duration {
+	if env.Status == StatusOK && env.Partial && s.ttls.Partial > 0 {
+		return s.ttls.Partial
+	}
+	return s.ttls.For(key.Kind, env.Status)
 }
 
 func (s *Store) lockDelay(int) time.Duration {
@@ -466,6 +483,7 @@ type Info struct {
 	CooldownKey        string    `json:"cooldown_key"`
 	Exists             bool      `json:"exists"`
 	Status             Status    `json:"status,omitempty"`
+	Partial            bool      `json:"partial,omitempty"`
 	ErrorCode          string    `json:"error_code,omitempty"`
 	FetchedAt          time.Time `json:"fetched_at,omitzero"`
 	AgeSeconds         float64   `json:"age_seconds,omitempty"`
@@ -486,7 +504,7 @@ func (s *Store) Inspect(ctx context.Context, key Key) (Info, error) {
 	default:
 		info.Exists, info.SizeBytes = true, len(b)
 		if env, derr := DecodeEnvelope(b); derr == nil {
-			info.Status, info.ErrorCode, info.FetchedAt = env.Status, env.ErrorCode, env.FetchedAt
+			info.Status, info.ErrorCode, info.FetchedAt, info.Partial = env.Status, env.ErrorCode, env.FetchedAt, env.Partial
 			info.AgeSeconds = s.now().Sub(env.FetchedAt).Seconds()
 		}
 		if ttl, terr := s.rdb.PTTL(ctx, key.Cache()).Result(); terr == nil && ttl > 0 {

@@ -15,6 +15,10 @@ var (
 	ErrUpstreamTimeout = errors.New("crawler: upstream timeout")
 	// ErrRateLimited means Firecrawl answered HTTP 429 and retries were exhausted.
 	ErrRateLimited = errors.New("crawler: upstream rate limited")
+	// ErrUpstreamUnavailable means Firecrawl refused OUR account: invalid API key (401), no
+	// credits left (402) or an out-of-band action such as accepting terms. It says nothing
+	// about the website, so it must never be cached as a per-site failure.
+	ErrUpstreamUnavailable = errors.New("crawler: upstream refused the account")
 )
 
 // Stable error codes, also used as error_code in cached failure envelopes.
@@ -22,6 +26,7 @@ const (
 	CodeUpstream    = "upstream_error"
 	CodeTimeout     = "upstream_timeout"
 	CodeRateLimited = "upstream_rate_limited"
+	CodeUnavailable = "upstream_unavailable"
 )
 
 // ErrorCode returns the stable code for a crawler error, or "" for any other error.
@@ -31,6 +36,8 @@ func ErrorCode(err error) string {
 		return CodeTimeout
 	case errors.Is(err, ErrRateLimited):
 		return CodeRateLimited
+	case errors.Is(err, ErrUpstreamUnavailable):
+		return CodeUnavailable
 	case errors.Is(err, ErrUpstream):
 		return CodeUpstream
 	}

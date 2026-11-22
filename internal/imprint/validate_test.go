@@ -8,8 +8,8 @@ import (
 
 func s(v string) *string { return &v }
 
-func hasWarning(ws []string, sub string) bool {
-	return slices.ContainsFunc(ws, func(w string) bool { return strings.Contains(w, sub) })
+func hasWarning(ws []Warning, sub string) bool {
+	return slices.ContainsFunc(ws, func(w Warning) bool { return strings.Contains(w.Message, sub) || w.Code == sub })
 }
 
 func TestValidateVAT(t *testing.T) {
@@ -202,5 +202,73 @@ func TestGroundingCheck(t *testing.T) {
 	}
 	if f.CompanyName == nil || f.Address == nil || f.Register.Type == nil {
 		t.Errorf("company name, address and register type must stay: %+v", f)
+	}
+}
+
+func TestWarningCodesAndFields(t *testing.T) {
+	f := &Fields{
+		CompanyName: s("ACME GmbH"), Address: &Address{PostalCode: s("123")}, Country: s("DE"),
+		VATID: s("ATU12345678"), Contact: &Contact{Email: s("not-an-email")},
+	}
+	got := map[string]string{}
+	for _, w := range Validate(f, "") {
+		if w.Message == "" {
+			t.Errorf("warning without message: %+v", w)
+		}
+		got[w.Field] = w.Code
+	}
+	want := map[string]string{
+		"address.postal_code": WarnInvalidFormat,
+		"vat_id":              WarnCountryMismatch,
+		"contact.email":       WarnInvalidRemoved,
+	}
+	for field, code := range want {
+		if got[field] != code {
+			t.Errorf("field %s: code %q, want %q (all: %v)", field, got[field], code, got)
+		}
+	}
+	missing := Validate(&Fields{}, "")
+	if missing[0].Code != WarnMissing || missing[0].Field != "company_name" {
+		t.Errorf("missing = %+v", missing)
+	}
+}
+
+func TestEmailDeobfuscation(t *testing.T) {
+	tests := []struct {
+		page, extracted, want, code string
+	}{
+		{"E-Mail: webmaster [at] tagesschau.de", "webmaster [at] tagesschau.de", "webmaster@tagesschau.de", WarnNormalized},
+		{"info (at) acme (dot) de", "info (at) acme (dot) de", "info@acme.de", WarnNormalized},
+		{"kontakt{ät}acme.de", "kontakt{ät}acme.de", "kontakt@acme.de", WarnNormalized},
+		{"info@acme.de", "info@acme.de", "info@acme.de", ""},
+		{"info at acme.de", "info at acme.de", "", WarnInvalidRemoved},   // bare "at" is never rewritten
+		{"nothing here", "info [at] acme.de", "", WarnUnverifiedRemoved}, // grounding uses the value as written
+	}
+	for _, tt := range tests {
+		f := &Fields{CompanyName: s("ACME"), Address: &Address{}, Contact: &Contact{Email: s(tt.extracted)}}
+		ws := Validate(f, "ACME "+tt.page)
+		var got string
+		if f.Contact != nil && f.Contact.Email != nil {
+			got = *f.Contact.Email
+		}
+		if got != tt.want {
+			t.Errorf("%q: email = %q, want %q", tt.extracted, got, tt.want)
+		}
+		if tt.code == "" && len(ws) != 0 || tt.code != "" && !hasWarning(ws, tt.code) {
+			t.Errorf("%q: warnings = %+v, want code %q", tt.extracted, ws, tt.code)
+		}
+	}
+}
+
+func TestLegalFormCasing(t *testing.T) {
+	for in, want := range map[string]string{
+		"gmbh": "GmbH", "GMBH & CO. KG": "GmbH & Co. KG", "ug (haftungsbeschränkt)": "UG (haftungsbeschränkt)",
+		"e.k.": "e.K.", "GmbH": "GmbH", "Ltd.": "Ltd.", "Gesellschaft mit beschränkter Haftung": "Gesellschaft mit beschränkter Haftung",
+	} {
+		f := &Fields{CompanyName: s("x"), Address: &Address{}, LegalForm: s(in)}
+		Validate(f, "")
+		if *f.LegalForm != want {
+			t.Errorf("legal form %q -> %q, want %q", in, *f.LegalForm, want)
+		}
 	}
 }
