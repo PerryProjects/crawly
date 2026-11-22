@@ -395,3 +395,70 @@ func TestExtractionFailureKeepsAcceptedPage(t *testing.T) {
 		t.Fatalf("imp = %+v", imp)
 	}
 }
+
+func TestEnglishImprintWithoutHeadingIsAccepted(t *testing.T) {
+	text := "[Imprint](/pages/imprint)\n\ngitti GmbH, Kastanienallee 43a, 10435 Berlin\nRepresented by Founder & Managing Director: J. Doe\nRegister court: Charlottenburg Local Court"
+	if reason := unusableReason(Extraction{StatusCode: 200, Text: text}); reason != "" {
+		t.Fatalf("rejected: %s", reason)
+	}
+}
+
+// renderingSite serves the imprint content only when the request waits for JavaScript.
+type renderingSite struct{ *fakeSite }
+
+func (r renderingSite) Scrape(ctx context.Context, url string, req crawler.ScrapeRequest) (*crawler.Page, error) {
+	p, err := r.fakeSite.Scrape(ctx, url, req)
+	if err == nil && url == "https://www.acme.de/impressum" && req.WaitFor == 0 {
+		return &crawler.Page{URL: p.URL, StatusCode: 200, Markdown: "[Impressum](https://www.acme.de/impressum) [Home](/)"}, nil
+	}
+	return p, err
+}
+
+func TestLinkedJavaScriptPageIsRetriedWithRenderWait(t *testing.T) {
+	inner := &fakeSite{pages: map[string]*crawler.Page{
+		"https://acme.de/":              {URL: "https://www.acme.de/", Links: []string{"https://www.acme.de/impressum"}, Markdown: "[Impressum](https://www.acme.de/impressum)"},
+		"https://www.acme.de/impressum": imprintPage("https://www.acme.de/impressum"),
+	}}
+	site := renderingSite{inner}
+	imp, err := NewService(site, NewFirecrawlExtractor(site)).Lookup(context.Background(), "acme.de")
+	if err != nil || imp.CompanyName == nil {
+		t.Fatalf("imp=%+v err=%v calls=%v", imp, err, inner.calls)
+	}
+	var waited int
+	for _, r := range inner.reqs {
+		if r.WaitFor > 0 {
+			waited++
+		}
+	}
+	if waited != 2 { // markdown retry and the JSON extraction both wait
+		t.Fatalf("requests with a render wait = %d, calls = %v", waited, inner.calls)
+	}
+}
+
+func TestProbesSkipURLsAlreadyFetched(t *testing.T) {
+	site := &fakeSite{pages: map[string]*crawler.Page{
+		"https://acme.de/":              {URL: "https://www.acme.de/", Links: []string{"https://www.acme.de/impressum"}},
+		"https://www.acme.de/impressum": {URL: "https://www.acme.de/impressum", StatusCode: 404},
+	}}
+	if _, err := newSvc(site).Lookup(context.Background(), "acme.de"); !errors.Is(err, ErrNotFound) {
+		t.Fatal(err)
+	}
+	for _, c := range site.calls {
+		if c == "https://acme.de/impressum" {
+			t.Fatalf("the www variant was already tried, calls = %v", site.calls)
+		}
+	}
+}
+
+func TestCanonicalImprintURL(t *testing.T) {
+	for _, tt := range [][3]string{
+		{"https://www.dfg.de/impressum?enodia=eyJ.abc", "https://www.dfg.de/impressum", "https://www.dfg.de/impressum"},
+		{"https://acme.de/impressum?lang=de", "https://acme.de/impressum?lang=de", "https://acme.de/impressum?lang=de"},
+		{"https://acme.de/legal/impressum", "https://acme.de/impressum", "https://acme.de/legal/impressum"}, // real redirect
+		{"", "https://acme.de/impressum", "https://acme.de/impressum"},
+	} {
+		if got := canonicalImprintURL(tt[0], tt[1]); got != tt[2] {
+			t.Errorf("canonicalImprintURL(%q, %q) = %q, want %q", tt[0], tt[1], got, tt[2])
+		}
+	}
+}

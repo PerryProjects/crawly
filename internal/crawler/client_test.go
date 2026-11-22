@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -76,11 +77,13 @@ func TestRetryAndErrorMapping(t *testing.T) {
 		{"503 forever is an outage", []error{httpErr(503), httpErr(503), httpErr(503)}, 3, ErrUpstreamUnavailable, []string{"outage", "outage", "outage"}},
 		{"firecrawl 408 is a timeout, not retried", []error{httpErr(http.StatusRequestTimeout)}, 1, ErrUpstreamTimeout, []string{"timeout"}},
 		{"400 is not retried", []error{httpErr(400)}, 1, ErrUpstream, []string{"error"}},
-		{"200 success:false is not retried", []error{&firecrawl.FirecrawlError{StatusCode: 200, ErrorCode: "SCRAPE_DNS_RESOLUTION_ERROR"}}, 1, ErrUpstream, []string{"error"}},
+		{"200 success:false is not retried", []error{&firecrawl.FirecrawlError{StatusCode: 200, ErrorCode: "SCRAPE_ALL_ENGINES_FAILED"}}, 1, ErrUpstream, []string{"error"}},
+		{"DNS failure is host not found", []error{&firecrawl.FirecrawlError{StatusCode: 200, ErrorCode: "SCRAPE_DNS_RESOLUTION_ERROR"}}, 1, ErrHostNotFound, []string{"error"}},
 		{"timeout is not retried", []error{context.DeadlineExceeded}, 1, ErrUpstreamTimeout, []string{"timeout"}},
 		{"401 is an account error", []error{&firecrawl.AuthenticationError{FirecrawlError: firecrawl.FirecrawlError{StatusCode: 401}}}, 1, ErrUpstreamUnavailable, []string{"account_error"}},
 		{"402 no credits is an account error", []error{httpErr(http.StatusPaymentRequired)}, 1, ErrUpstreamUnavailable, []string{"account_error"}},
 		{"pending terms is an account error", []error{&firecrawl.FirecrawlError{StatusCode: 403, RequiresAction: &firecrawl.RequiresAction{Type: "accept_terms"}}}, 1, ErrUpstreamUnavailable, []string{"account_error"}},
+		{"500 with a site error code is a site failure, not retried", []error{&firecrawl.FirecrawlError{StatusCode: 500, ErrorCode: "SCRAPE_SSL_ERROR"}}, 1, ErrUpstream, []string{"error"}},
 		{"403 without action is site specific", []error{httpErr(http.StatusForbidden)}, 1, ErrUpstream, []string{"error"}},
 	}
 	for _, tt := range tests {
@@ -370,6 +373,9 @@ func TestSDK5xxIsAnOutageNotASiteFailure(t *testing.T) {
 }
 
 func TestErrorCode(t *testing.T) {
+	if ErrorCode(fmt.Errorf("%w: %w", ErrHostNotFound, ErrUpstream)) != CodeHostNotFound {
+		t.Fatal("host not found code")
+	}
 	if ErrorCode(ErrUpstreamUnavailable) != CodeUnavailable || errors.Is(ErrUpstreamUnavailable, ErrUpstream) {
 		t.Fatal("account errors must not count as site failures")
 	}
@@ -424,5 +430,20 @@ func TestNoRetryThatTheDeadlineWouldCut(t *testing.T) {
 	_, err := c.Scrape(ctx, "https://example.de/", ScrapeRequest{})
 	if fs.calls != 1 || !errors.Is(err, ErrUpstreamUnavailable) {
 		t.Fatalf("calls=%d err=%v; want one call and the classified error", fs.calls, err)
+	}
+}
+
+func TestPerRequestTimeout(t *testing.T) {
+	var body map[string]any
+	c := newSDKClient(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		_, _ = io.WriteString(w, `{"success":true,"data":{"markdown":"x"}}`)
+	}, WithTimeout(30*time.Second))
+	if _, err := c.Scrape(context.Background(), "https://example.de/", ScrapeRequest{Branding: true, Timeout: 50 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if body["timeout"] != float64(45000) { // 90 % of the request's own timeout
+		t.Fatalf("firecrawl timeout = %v", body["timeout"])
 	}
 }

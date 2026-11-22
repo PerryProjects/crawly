@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/OWNER/siteinfo/internal/crawler"
 )
@@ -26,7 +27,13 @@ type Extraction struct {
 // It is an interface so a registry based verification step (Handelsregister,
 // Firmenbuch, Zefix) can wrap or replace the Firecrawl implementation later.
 type Extractor interface {
-	Extract(ctx context.Context, pageURL string) (Extraction, error)
+	Extract(ctx context.Context, pageURL string, opt ExtractOptions) (Extraction, error)
+}
+
+// ExtractOptions tune one extraction.
+type ExtractOptions struct {
+	// RenderWait gives client-side rendered pages time to load their content.
+	RenderWait time.Duration
 }
 
 // FirecrawlExtractor reads a candidate page in two steps. Step 1 fetches only the markdown,
@@ -42,9 +49,9 @@ func NewFirecrawlExtractor(scraper Scraper) *FirecrawlExtractor {
 }
 
 // Extract implements Extractor.
-func (e *FirecrawlExtractor) Extract(ctx context.Context, pageURL string) (Extraction, error) {
+func (e *FirecrawlExtractor) Extract(ctx context.Context, pageURL string, opt ExtractOptions) (Extraction, error) {
 	// FullPage: the legal text is the point; do not let a main-content heuristic cut it.
-	page, err := e.scraper.Scrape(ctx, pageURL, crawler.ScrapeRequest{Markdown: true, FullPage: true})
+	page, err := e.scraper.Scrape(ctx, pageURL, crawler.ScrapeRequest{Markdown: true, FullPage: true, WaitFor: opt.RenderWait})
 	if err != nil {
 		return Extraction{}, fmt.Errorf("imprint: scrape %s: %w", pageURL, err)
 	}
@@ -55,6 +62,7 @@ func (e *FirecrawlExtractor) Extract(ctx context.Context, pageURL string) (Extra
 
 	page, err = e.scraper.Scrape(ctx, pageURL, crawler.ScrapeRequest{
 		FullPage: true,
+		WaitFor:  opt.RenderWait,
 		JSON:     &crawler.JSONExtract{Prompt: extractionPrompt, Schema: extractionSchema()},
 	})
 	if err != nil {

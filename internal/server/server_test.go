@@ -286,6 +286,8 @@ func TestErrorMapping(t *testing.T) {
 		{"shutting down", cache.ErrClosed, 503, "unavailable", true},
 		{"cached upstream failure", &cache.CachedError{Code: crawler.CodeUpstream}, 502, "upstream_error", false},
 		{"cached timeout", &cache.CachedError{Code: crawler.CodeTimeout}, 504, "timeout", false},
+		{"domain does not resolve", fmt.Errorf("x: %w: %w", crawler.ErrHostNotFound, crawler.ErrUpstream), 422, "host_not_found", false},
+		{"cached host not found", &cache.CachedError{Code: crawler.CodeHostNotFound}, 422, "host_not_found", false},
 		{"client gone", context.Canceled, 499, "client_closed_request", false},
 		{"unknown", errors.New("secret internal detail"), 500, "internal_error", false},
 	}

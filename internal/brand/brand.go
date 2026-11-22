@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -88,11 +89,16 @@ type Scraper interface {
 // Service fetches brand data for a host.
 type Service struct {
 	scraper Scraper
+	timeout time.Duration // per-call timeout of the branding scrape, 0 = crawler default
 	log     *zap.SugaredLogger
 }
 
 // Option configures optional Service settings.
 type Option func(*Service)
+
+// WithTimeout sets the per-call timeout of the branding scrape. Rendering the page for
+// branding takes far longer than a plain scrape on large sites.
+func WithTimeout(d time.Duration) Option { return func(s *Service) { s.timeout = d } }
 
 // WithLogger sets the logger.
 func WithLogger(l *zap.Logger) Option { return func(s *Service) { s.log = l.Sugar() } }
@@ -131,6 +137,7 @@ func (s *Service) Lookup(ctx context.Context, host string) (*Brand, error) {
 	homepage := "https://" + host + "/"
 	page, err := crawler.ScrapeHomepage(ctx, s.scraper, host, crawler.ScrapeRequest{
 		Branding: true,
+		Timeout:  s.timeout,
 		JSON:     &crawler.JSONExtract{Prompt: extractionPrompt, Schema: extractionSchema()},
 	})
 	if err != nil {

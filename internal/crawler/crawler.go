@@ -5,6 +5,7 @@ package crawler
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // Typed upstream errors. Callers match them with errors.Is.
@@ -19,19 +20,25 @@ var (
 	// (invalid API key 401, no credits 402, pending terms) or it is failing (5xx, unreachable).
 	// It says nothing about the website, so it must never be cached as a per-site failure.
 	ErrUpstreamUnavailable = errors.New("crawler: upstream unavailable")
+	// ErrHostNotFound means the site's domain does not resolve (DNS). It also matches ErrUpstream
+	// (a site failure that is negative-cached), but callers can tell the user to check the URL.
+	ErrHostNotFound = errors.New("crawler: host not found")
 )
 
 // Stable error codes, also used as error_code in cached failure envelopes.
 const (
-	CodeUpstream    = "upstream_error"
-	CodeTimeout     = "upstream_timeout"
-	CodeRateLimited = "upstream_rate_limited"
-	CodeUnavailable = "upstream_unavailable"
+	CodeUpstream     = "upstream_error"
+	CodeTimeout      = "upstream_timeout"
+	CodeRateLimited  = "upstream_rate_limited"
+	CodeUnavailable  = "upstream_unavailable"
+	CodeHostNotFound = "host_not_found"
 )
 
 // ErrorCode returns the stable code for a crawler error, or "" for any other error.
 func ErrorCode(err error) string {
 	switch {
+	case errors.Is(err, ErrHostNotFound):
+		return CodeHostNotFound
 	case errors.Is(err, ErrUpstreamTimeout):
 		return CodeTimeout
 	case errors.Is(err, ErrRateLimited):
@@ -58,7 +65,11 @@ type ScrapeRequest struct {
 	// FullPage disables Firecrawl's "main content only" filter. Needed for
 	// footer links and for legally relevant page text.
 	FullPage bool
-	JSON     *JSONExtract
+	// WaitFor lets the page's JavaScript run before the content is taken (0 = Firecrawl default).
+	WaitFor time.Duration
+	// Timeout overrides the client's per-call timeout for this request (0 = default).
+	Timeout time.Duration
+	JSON    *JSONExtract
 }
 
 // Page is the subset of a Firecrawl document this service uses.

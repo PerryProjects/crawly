@@ -122,12 +122,15 @@ type FirecrawlConfig struct {
 	APIURL string `mapstructure:"api_url"`
 	// Country (ISO 3166 alpha-2, empty = off) and Languages are sent as Firecrawl's `location`, so
 	// geo-dependent sites answer with their DACH variant. See crawler.WithLocation.
-	Country        string        `mapstructure:"country"`
-	Languages      []string      `mapstructure:"languages"`
-	Timeout        time.Duration `mapstructure:"timeout"`
-	MaxConcurrency int           `mapstructure:"max_concurrency"`
-	MaxRetries     int           `mapstructure:"max_retries"`
-	BackoffBase    time.Duration `mapstructure:"backoff_base"`
+	Country   string        `mapstructure:"country"`
+	Languages []string      `mapstructure:"languages"`
+	Timeout   time.Duration `mapstructure:"timeout"`
+	// BrandingTimeout is used for the branding scrape, which renders the full page and measured
+	// up to ~30 s on large shops (mediamarkt.de) while plain scrapes take ~1 s.
+	BrandingTimeout time.Duration `mapstructure:"branding_timeout"`
+	MaxConcurrency  int           `mapstructure:"max_concurrency"`
+	MaxRetries      int           `mapstructure:"max_retries"`
+	BackoffBase     time.Duration `mapstructure:"backoff_base"`
 }
 
 // CacheConfig configures the read-through cache.
@@ -161,12 +164,12 @@ func Default() Config {
 			Addr:              ":8080",
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      60 * time.Second,
+			WriteTimeout:      80 * time.Second,
 			IdleTimeout:       120 * time.Second,
-			HandlerTimeout:    45 * time.Second,
+			HandlerTimeout:    65 * time.Second,
 			RetryAfter:        5 * time.Second,
 			ShutdownDelay:     5 * time.Second,
-			ShutdownTimeout:   50 * time.Second,
+			ShutdownTimeout:   70 * time.Second,
 			MaxHeaderBytes:    16 << 10,
 			MaxConnections:    10000,
 		},
@@ -190,18 +193,19 @@ func Default() Config {
 			PoolSize:     20,
 		},
 		Firecrawl: FirecrawlConfig{
-			APIURL:         "https://api.firecrawl.dev",
-			Country:        "DE",
-			Languages:      []string{"de"},
-			Timeout:        30 * time.Second,
-			MaxConcurrency: 4,
-			MaxRetries:     2,
-			BackoffBase:    500 * time.Millisecond,
+			APIURL:          "https://api.firecrawl.dev",
+			Country:         "DE",
+			Languages:       []string{"de"},
+			Timeout:         30 * time.Second,
+			BrandingTimeout: 50 * time.Second,
+			MaxConcurrency:  4,
+			MaxRetries:      2,
+			BackoffBase:     500 * time.Millisecond,
 		},
 		Cache: CacheConfig{
-			LoadTimeout:  40 * time.Second,
+			LoadTimeout:  60 * time.Second,
 			LockMargin:   10 * time.Second,
-			CloseTimeout: 45 * time.Second,
+			CloseTimeout: 65 * time.Second,
 			TTL: TTLConfig{
 				ImprintOK: 30 * 24 * time.Hour,
 				BrandOK:   30 * 24 * time.Hour,
@@ -346,6 +350,7 @@ func (c *Config) Validate() error {
 		"server.handler_timeout":     c.Server.HandlerTimeout,
 		"server.shutdown_timeout":    c.Server.ShutdownTimeout,
 		"firecrawl.timeout":          c.Firecrawl.Timeout,
+		"firecrawl.branding_timeout": c.Firecrawl.BrandingTimeout,
 		"firecrawl.backoff_base":     c.Firecrawl.BackoffBase,
 		"cache.load_timeout":         c.Cache.LoadTimeout,
 		"cache.lock_margin":          c.Cache.LockMargin,
@@ -364,8 +369,8 @@ func (c *Config) Validate() error {
 	if c.Server.ShutdownDelay < 0 || c.Server.RetryAfter < 0 {
 		add("server.shutdown_delay and server.retry_after must not be negative")
 	}
-	if c.Firecrawl.Timeout >= c.Cache.LoadTimeout {
-		add("firecrawl.timeout (%s) must be shorter than cache.load_timeout (%s)", c.Firecrawl.Timeout, c.Cache.LoadTimeout)
+	if longest := max(c.Firecrawl.Timeout, c.Firecrawl.BrandingTimeout); longest >= c.Cache.LoadTimeout {
+		add("firecrawl.timeout and firecrawl.branding_timeout (%s) must be shorter than cache.load_timeout (%s)", longest, c.Cache.LoadTimeout)
 	}
 	if c.Cache.LoadTimeout >= c.Server.HandlerTimeout {
 		add("cache.load_timeout (%s) must be shorter than server.handler_timeout (%s)", c.Cache.LoadTimeout, c.Server.HandlerTimeout)

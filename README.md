@@ -94,7 +94,7 @@ Undecodable or wrong-version entries are deleted and treated as a miss.
 - **The lock is a cost optimization, not a correctness guarantee.** redsync runs against one logical Redis
   (a cluster client talks to one master per slot). A failover or an expired lock can let two pods load the same
   host: one extra Firecrawl call and an idempotent `SET`. Nothing here depends on mutual exclusion.
-- **Waiting for the lock spends the load budget.** The 40 s load deadline covers lock wait *and* upstream work. If
+- **Waiting for the lock spends the load budget.** The 60 s load deadline covers lock wait *and* upstream work. If
   another pod holds the lock for 35 s, we usually end up with a double-check hit instead of a crawl; if it holds it
   longer, the caller gets 503 and retries.
 - **Negative results are cached** so broken sites do not burn credits: `not_found` 24 h, `error` 5 min. Only
@@ -257,12 +257,12 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | `server.addr` | `SITEINFO_SERVER_ADDR` | `:8080` | API |
 | `server.read_header_timeout` | `…_READ_HEADER_TIMEOUT` | `5s` | |
 | `server.read_timeout` | `…_READ_TIMEOUT` | `10s` | |
-| `server.write_timeout` | `…_WRITE_TIMEOUT` | `60s` | must be > `handler_timeout` |
+| `server.write_timeout` | `…_WRITE_TIMEOUT` | `80s` | must be > `handler_timeout` |
 | `server.idle_timeout` | `…_IDLE_TIMEOUT` | `120s` | |
-| `server.handler_timeout` | `…_HANDLER_TIMEOUT` | `45s` | context deadline per lookup |
+| `server.handler_timeout` | `…_HANDLER_TIMEOUT` | `65s` | context deadline per lookup |
 | `server.retry_after` | `…_RETRY_AFTER` | `5s` | `Retry-After` on 503 |
 | `server.shutdown_delay` | `…_SHUTDOWN_DELAY` | `5s` | keep serving (not ready) before draining |
-| `server.shutdown_timeout` | `…_SHUTDOWN_TIMEOUT` | `50s` | HTTP drain limit |
+| `server.shutdown_timeout` | `…_SHUTDOWN_TIMEOUT` | `70s` | HTTP drain limit |
 | `server.max_header_bytes` | `…_MAX_HEADER_BYTES` | `16384` | request header limit |
 | `server.max_connections` | `…_MAX_CONNECTIONS` | `10000` | simultaneous TCP connections, `0` = unlimited |
 | `server.trusted_proxies` | `SITEINFO_SERVER_TRUSTED_PROXIES` | – | CIDRs of reverse proxies whose `X-Forwarded-For` is trusted; empty = TCP peer address |
@@ -278,12 +278,13 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | `firecrawl.api_url` | `SITEINFO_FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | |
 | `firecrawl.country` / `languages` | `SITEINFO_FIRECRAWL_COUNTRY` / `…_LANGUAGES` | `DE` / `de` | Firecrawl `location`: fetch as a visitor from this country (upper-case ISO code, empty = off) and ask for these languages. Geo-dependent sites otherwise serve the wrong variant, see below |
 | `firecrawl.timeout` | `…_TIMEOUT` | `30s` | per call |
+| `firecrawl.branding_timeout` | `…_BRANDING_TIMEOUT` | `50s` | per call for the branding scrape, which renders the whole page (measured ~29 s on mediamarkt.de, where a plain scrape takes ~1 s) |
 | `firecrawl.max_concurrency` | `…_MAX_CONCURRENCY` | `4` | per pod |
 | `firecrawl.max_retries` | `…_MAX_RETRIES` | `2` | on 429/5xx/transport errors |
 | `firecrawl.backoff_base` | `…_BACKOFF_BASE` | `500ms` | exponential, equal jitter |
-| `cache.load_timeout` | `SITEINFO_CACHE_LOAD_TIMEOUT` | `40s` | lock wait + upstream |
-| `cache.lock_margin` | `…_LOCK_MARGIN` | `10s` | lock expiry = load timeout + margin (50 s) |
-| `cache.close_timeout` | `…_CLOSE_TIMEOUT` | `45s` | wait for in-flight loads on shutdown |
+| `cache.load_timeout` | `SITEINFO_CACHE_LOAD_TIMEOUT` | `60s` | lock wait + upstream |
+| `cache.lock_margin` | `…_LOCK_MARGIN` | `10s` | lock expiry = load timeout + margin (70 s) |
+| `cache.close_timeout` | `…_CLOSE_TIMEOUT` | `65s` | wait for in-flight loads on shutdown |
 | `cache.ttl.imprint_ok` / `brand_ok` | `SITEINFO_CACHE_TTL_IMPRINT_OK` / `…_BRAND_OK` | `720h` | 30 d |
 | `cache.ttl.not_found` | `SITEINFO_CACHE_TTL_NOT_FOUND` | `24h` | |
 | `cache.ttl.error` | `SITEINFO_CACHE_TTL_ERROR` | `5m` | |
@@ -295,7 +296,7 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | `protect.auth_failures_per_minute` | `SITEINFO_PROTECT_AUTH_FAILURES_PER_MINUTE` | `10` | failed authentications per IP before it is blocked, `0` = off |
 | `protect.max_inflight_requests` | `SITEINFO_PROTECT_MAX_INFLIGHT_REQUESTS` | `256` | concurrent `/v1` requests per pod, `0` = off |
 | `protect.max_tracked_keys` | `SITEINFO_PROTECT_MAX_TRACKED_KEYS` | `100000` | bound on limiter memory |
-| `protect.max_concurrent_loads` | `SITEINFO_PROTECT_MAX_CONCURRENT_LOADS` | `8` | concurrent upstream loads per pod, `0` = off; keep it near 2 × `firecrawl.max_concurrency`, otherwise loads wait for a Firecrawl slot inside their 40 s budget |
+| `protect.max_concurrent_loads` | `SITEINFO_PROTECT_MAX_CONCURRENT_LOADS` | `8` | concurrent upstream loads per pod, `0` = off; keep it near 2 × `firecrawl.max_concurrency`, otherwise loads wait for a Firecrawl slot inside their 60 s budget |
 | `protect.load_rate` / `load_burst` | `SITEINFO_PROTECT_LOAD_RATE` / `…_LOAD_BURST` | `2` / `10` | upstream loads (cache misses) per second per pod, `0` = off |
 | `debug.enabled` | `SITEINFO_DEBUG_ENABLED` | `false` | debug aids (`debug=1` traces, cache flush, config view); **never in production** |
 | `otel.exporter` | `SITEINFO_OTEL_EXPORTER` | `otlp` | `otlp`, `stdout` or `none` |
@@ -304,9 +305,9 @@ The file is unmarshalled once into a validated struct at startup (`internal/conf
 | `otel.service_name` | `SITEINFO_OTEL_SERVICE_NAME` | `siteinfo` | `OTEL_SERVICE_NAME` wins if set |
 
 **Timeout chain** (validated at startup, each stage longer than the one below):
-`firecrawl.timeout 30s` < `cache.load_timeout 40s` < `server.handler_timeout 45s` < lock expiry `50s`;
-`server.write_timeout 60s` > handler timeout. **Ingress/Traefik timeouts must be longer than the handler timeout**
-(≥ 60 s for read/response timeouts, and no idle timeout shorter than the longest request), otherwise the proxy
+`firecrawl.timeout 30s` and `firecrawl.branding_timeout 50s` < `cache.load_timeout 60s` < `server.handler_timeout 65s`
+< lock expiry `70s`; `server.write_timeout 80s` > handler timeout. **Ingress/Traefik timeouts must be longer than the
+handler timeout** (≥ 80 s for read/response timeouts, and no idle timeout shorter than the longest request), otherwise the proxy
 cuts requests that the service would still answer.
 
 ## Overload and DDoS protection
@@ -376,7 +377,7 @@ Details that matter:
 (4) `store.Close(ctx)` waits for in-flight loads (≤ `cache.close_timeout`), (5) Redis is closed.
 
 Kubernetes ([`deploy/k8s`](deploy/k8s), `kubectl kustomize deploy/k8s` renders cleanly; **not applied to a
-cluster**): Deployment with probes, resources, `terminationGracePeriodSeconds: 120` (must exceed preStop +
+cluster**): Deployment with probes, resources, `terminationGracePeriodSeconds: 160` (must exceed preStop +
 `shutdown_delay` + drain, i.e. > load timeout + delay), `preStop` sleep (native `sleep` action, Kubernetes ≥ 1.30,
 because distroless has no `sleep` binary; on older clusters rely on `shutdown_delay`), Service, HPA, PDB,
 ConfigMap, and a Secret *template* (`secret.example.yaml`, not in the kustomization).
@@ -465,7 +466,7 @@ turns them on.
   is intended: the operator confirmed that customers keep working with this data in the calling tool, which persists
   it. Here it lives only in Redis for up to the TTL. Logs deliberately contain the host, never the imprint fields
   (`imprint.Imprint` has a log marshaler that omits them).
-- **Imprint budget.** A load runs inside the 40 s load budget. Worst case (subdomain without imprint): homepage, 2 linked
+- **Imprint budget.** A load runs inside the 60 s load budget. Worst case (subdomain without imprint): homepage, 2 linked
   candidates, 3 probes, then the parent's homepage and 2 candidates; every candidate is one fast markdown call and only the
   accepted page gets the slow extraction. Slow sites may still end as 504 (not cached).
 - **Geo-dependent sites.** Firecrawl's default location is the US. Live example: `eu.store.bambulab.com` redirects US

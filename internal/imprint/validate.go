@@ -26,11 +26,38 @@ var (
 	reRegAT = regexp.MustCompile(`^\d{1,7} ?[A-Z]$`)
 
 	// A register type glued to the number ("HRB 104144", "FN123456a"), a common LLM habit.
-	reRegPrefixed = regexp.MustCompile(`(?i)^(HRA|HRB|GNR|PR|VR|FN)[.:\s]*(\d.*)$`)
+	// Spaced spellings occur too ("HR B 59603", seen live).
+	reRegPrefixed = regexp.MustCompile(`(?i)^(H\s?R\s?A|H\s?R\s?B|G\s?n\s?R|P\s?R|V\s?R|F\s?N)[.:\s]*(\d.*)$`)
+	// Separators between several VAT IDs in one field ("DE 326114858, CHE-276.969.644", seen live).
+	reVATSplit = regexp.MustCompile(`(?i)\s*(?:[,;/|]|\bund\b|\band\b)\s*`)
+
+	reCHUID    = regexp.MustCompile(`^CHE-\d{3}\.\d{3}\.\d{3}$`)
+	reDigitGap = regexp.MustCompile(`(\d)[ .](\d)`)
 
 	rePostalDE = regexp.MustCompile(`^\d{5}$`)
 	rePostal4  = regexp.MustCompile(`^\d{4}$`) // AT and CH
 )
+
+// registerTypeInText finds "<type> <number>" in text, e.g. "HRB 382746" or "HR B 382746", and
+// returns the canonical type, or "".
+func registerTypeInText(text, number string) string {
+	digits := strings.Join(strings.Fields(number), `\s*`)
+	re, err := regexp.Compile(`(?i)\b(H\s?R\s?A|H\s?R\s?B|G\s?n\s?R|P\s?R|V\s?R|F\s?N)\.?\s*(?:Nr\.?\s*)?` + digits + `\b`)
+	if err != nil {
+		return ""
+	}
+	m := re.FindStringSubmatch(text)
+	if m == nil {
+		return ""
+	}
+	if t, ok := registerTypes[strings.ToUpper(strings.Join(strings.Fields(m[1]), ""))]; ok {
+		return t.canonical
+	}
+	return ""
+}
+
+// genericRegisterNames are register names that are not a register type.
+var genericRegisterNames = map[string]bool{"HANDELSREGISTER": true, "COMMERCIALREGISTER": true, "HR": true, "REGISTERGERICHT": true}
 
 // registerTypes maps a normalized register type to its canonical spelling and country.
 var registerTypes = map[string]struct{ canonical, country string }{
@@ -134,25 +161,54 @@ func effectiveCountry(f *Fields) string {
 	return ""
 }
 
+// classifyVAT normalizes one VAT ID and returns its country, or ok=false if it matches no format.
+func classifyVAT(raw string) (v, vatCountry string, ok bool) {
+	v = compact(raw)
+	switch {
+	case reVATDE.MatchString(v):
+		return v, "DE", true
+	case reVATAT.MatchString(v):
+		return v, "AT", true
+	case reVATCH.MatchString(v):
+		if m := reVATCH.FindStringSubmatch(v); m[1] != "" {
+			v = strings.TrimSuffix(v, m[1]) + " " + m[1]
+		}
+		return v, "CH", true
+	}
+	return v, "", false
+}
+
 func validateVAT(f *Fields, text, country string, warn func(string, string, string, ...any)) {
 	if f.VATID == nil {
 		return
 	}
-	v := compact(*f.VATID)
-	var vatCountry string
-	switch {
-	case reVATDE.MatchString(v):
-		vatCountry = "DE"
-	case reVATAT.MatchString(v):
-		vatCountry = "AT"
-	case reVATCH.MatchString(v):
-		vatCountry = "CH"
-		if m := reVATCH.FindStringSubmatch(v); m[1] != "" {
-			v = strings.TrimSuffix(v, m[1]) + " " + m[1]
+	v, vatCountry, ok := classifyVAT(*f.VATID)
+	if !ok {
+		// Several IDs in one field: keep the one of the imprint country (else the first) in vat_id.
+		var valid [][2]string
+		for _, part := range reVATSplit.Split(*f.VATID, -1) {
+			if pv, pc, pok := classifyVAT(part); pok && grounded(text, pv) {
+				valid = append(valid, [2]string{pv, pc})
+			}
 		}
-	default:
-		warn(WarnInvalidFormat, "vat_id", "vat_id %q does not match the DE (DE+9 digits), AT (ATU+8 digits) or CH (CHE-123.456.789) format", *f.VATID)
-		return
+		if len(valid) < 2 {
+			warn(WarnInvalidFormat, "vat_id", "vat_id %q does not match the DE (DE+9 digits), AT (ATU+8 digits) or CH (CHE-123.456.789) format", *f.VATID)
+			return
+		}
+		primary := 0
+		for i, x := range valid {
+			if x[1] == country {
+				primary = i
+				break
+			}
+		}
+		v, vatCountry = valid[primary][0], valid[primary][1]
+		for i, x := range valid {
+			if i != primary {
+				f.OtherVATIDs = append(f.OtherVATIDs, x[0])
+			}
+		}
+		warn(WarnNormalized, "vat_id", "several VAT IDs were listed (%q); vat_id holds %s, the others are in other_vat_ids", *f.VATID, v)
 	}
 	f.VATID = &v
 	if country != "" && vatCountry != country {
@@ -185,10 +241,32 @@ func validateRegister(f *Fields, text, country string, warn func(string, string,
 			num := strings.TrimSpace(m[2])
 			r.Number = &num
 			if r.Type == nil {
-				t := m[1]
+				t := strings.Join(strings.Fields(m[1]), "")
 				r.Type = &t
 			}
 		}
+	}
+	// The model sometimes keeps only "HR" or nothing while the page says "HRB 382746" (seen live:
+	// bergfreunde.de). Take the type from the page when it stands right before this number.
+	if r.Number != nil && (r.Type == nil || genericRegisterNames[strings.ToUpper(strings.ReplaceAll(*r.Type, " ", ""))]) {
+		if t := registerTypeInText(text, *r.Number); t != "" {
+			r.Type = &t
+			warn(WarnNormalized, "register.type", "register.type %s taken from the page text next to the number", t)
+		}
+	}
+	// "Firmenbuchnummer: 42354k" (seen live): the page names the Austrian Firmenbuch, the number has
+	// its format, only the abbreviation is missing.
+	if r.Type == nil && r.Number != nil && reRegAT.MatchString(strings.ToUpper(strings.TrimSpace(*r.Number))) &&
+		strings.Contains(strings.ToLower(text), "firmenbuch") {
+		fn := "FN"
+		r.Type = &fn
+		warn(WarnNormalized, "register.type", "register.type set to FN: the page names the Firmenbuch and the number has its format")
+	}
+	// Swiss companies are registered under their UID (seen live: blackroll.com lists only "CHE-228.574.355").
+	if r.Type == nil && r.Number != nil && reCHUID.MatchString(strings.TrimSpace(*r.Number)) {
+		uid := "UID"
+		r.Type = &uid
+		warn(WarnNormalized, "register.type", "register.type set to UID: the number is a Swiss company identification number")
 	}
 	var typ struct{ canonical, country string }
 	known := false
@@ -197,6 +275,9 @@ func validateRegister(f *Fields, text, country string, warn func(string, string,
 		if typ, known = registerTypes[key]; known {
 			c := typ.canonical
 			r.Type = &c
+		} else if genericRegisterNames[key] && country == "DE" {
+			// Seen live: "Entry in Handelsregister, Register Number: 166842" — the page does not say HRA or HRB.
+			warn(WarnMissing, "register.type", "register.type only names the register (%q); the page does not state the type (e.g. HRA or HRB)", *r.Type)
 		} else if country == "DE" || country == "AT" {
 			warn(WarnInvalidFormat, "register.type", "register.type %q is not a known %s register type", *r.Type, country)
 		}
@@ -215,7 +296,8 @@ func validateRegister(f *Fields, text, country string, warn func(string, string,
 			warn(WarnInvalidFormat, "register.number", "register.number %q is not a valid Firmenbuch number (digits plus a letter, e.g. 123456a)", *r.Number)
 		}
 	case known && typ.country == "DE", !known && country == "DE":
-		if !reRegDE.MatchString(strings.TrimSpace(num)) {
+		// Digit groups are sometimes spaced ("HRA 6 11 12", seen live); judge the format without them.
+		if !reRegDE.MatchString(reDigitGap.ReplaceAllString(strings.TrimSpace(num), "$1$2")) {
 			warn(WarnInvalidFormat, "register.number", "register.number %q is not a valid German register number", *r.Number)
 		}
 	}

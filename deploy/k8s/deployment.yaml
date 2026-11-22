@@ -14,9 +14,9 @@ spec:
     metadata:
       labels: {app.kubernetes.io/name: siteinfo}
     spec:
-      # Must exceed: preStop (5s) + shutdown_delay (5s) + http drain (<= handler timeout 45s)
-      # + store close (<= load timeout 40s, overlaps the drain in practice). 120s leaves headroom.
-      terminationGracePeriodSeconds: 120
+      # Must exceed: preStop (5s) + shutdown_delay (5s) + http drain (<= shutdown_timeout 70s)
+      # + store close (<= close_timeout 65s, overlaps the drain in practice). 160s leaves headroom.
+      terminationGracePeriodSeconds: 160
       securityContext:
         runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}

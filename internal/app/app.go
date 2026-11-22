@@ -80,7 +80,7 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 		crawler.WithObserver(m),
 	)
 	imprints := imprint.NewService(cr, imprint.NewFirecrawlExtractor(cr), imprint.WithLogger(log))
-	brands := brand.NewService(cr, brand.WithLogger(log))
+	brands := brand.NewService(cr, brand.WithLogger(log), brand.WithTimeout(cfg.Firecrawl.BrandingTimeout))
 
 	store := cache.NewStore(rdb,
 		cache.WithLoadTimeout(cfg.Cache.LoadTimeout),
@@ -197,7 +197,7 @@ func classify(err error) cache.Verdict {
 	case errors.Is(err, crawler.ErrUpstreamTimeout):
 		return cache.Verdict{Status: cache.StatusError, Code: crawler.CodeTimeout}
 	case errors.Is(err, crawler.ErrUpstream):
-		return cache.Verdict{Status: cache.StatusError, Code: crawler.CodeUpstream}
+		return cache.Verdict{Status: cache.StatusError, Code: crawler.ErrorCode(err)} // upstream_error or host_not_found
 	}
 	return cache.Verdict{}
 }

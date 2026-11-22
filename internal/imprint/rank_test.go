@@ -147,3 +147,14 @@ func TestRankLinksRejectsUnsafeTargets(t *testing.T) {
 		t.Fatalf("got %v", urls(got))
 	}
 }
+
+func TestSameHostBeatsExternalEvenWithBetterPath(t *testing.T) {
+	base, _ := url.Parse("https://www.kessberlin.de/")
+	got := RankLinks([]string{"kessberlin.de"}, base, []Link{
+		{URL: "https://askstella.ai/imprint/", Text: "Impressum"},
+		{URL: "https://www.kessberlin.de/policies/legal-notice", Text: "Impressum"},
+	})
+	if len(got) != 2 || got[0].URL != "https://www.kessberlin.de/policies/legal-notice" || !got[1].External {
+		t.Fatalf("got %+v", got)
+	}
+}

@@ -47,6 +47,7 @@ type Fields struct {
 	Contact               *Contact  `json:"contact"`
 	Register              *Register `json:"register"`
 	VATID                 *string   `json:"vat_id"`
+	OtherVATIDs           []string  `json:"other_vat_ids,omitempty"` // further VAT IDs listed on the page
 	SupervisoryAuthority  *string   `json:"supervisory_authority"`
 	ResponsibleForContent *string   `json:"responsible_for_content"`
 	Country               *string   `json:"country"` // DE, AT or CH

@@ -43,7 +43,10 @@ var keywords = []struct {
 var privacyWords = []string{"datenschutz", "privacy", "privatsphaere", "privatsphäre", "cookie"}
 
 // exactPaths get a large bonus: the canonical imprint locations.
-var exactPaths = []string{"/impressum", "/imprint", "/legal-notice", "/anbieterkennung"}
+var exactPaths = []string{
+	"/impressum", "/imprint", "/legal-notice", "/anbieterkennung",
+	"/policies/legal-notice", "/pages/impressum", "/pages/imprint", // Shopify conventions
+}
 
 var canonicalizer = strings.NewReplacer("_", "-", " ", "-", " ", "-")
 
@@ -147,7 +150,11 @@ func score(u *url.URL, text string, hosts []string) (Candidate, bool) {
 		s += 100
 	}
 	external := !related(u.Hostname(), hosts)
-	if !external {
+	if external {
+		// An unrelated host only wins when the site links nothing of its own: footers also link
+		// agencies' or tool vendors' imprints (seen live: kessberlin.de linking askstella.ai).
+		s -= 200
+	} else {
 		s += 50
 	}
 	if u.RawQuery != "" {

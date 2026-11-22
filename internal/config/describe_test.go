@@ -28,8 +28,8 @@ func TestDescribeRedactsSecretsAndFormatsDurations(t *testing.T) {
 	if d["redis"].(map[string]any)["username"] != "" {
 		t.Errorf("non-secret empty values stay as they are")
 	}
-	if got := d["server"].(map[string]any)["handler_timeout"]; got != "45s" {
-		t.Errorf("handler_timeout = %v, want the string 45s", got)
+	if got := d["server"].(map[string]any)["handler_timeout"]; got != "1m5s" {
+		t.Errorf("handler_timeout = %v, want the string 1m5s", got)
 	}
 	if got := d["cache"].(map[string]any)["ttl"].(map[string]any)["imprint_ok"]; got != "720h0m0s" {
 		t.Errorf("nested duration = %v", got)

@@ -90,6 +90,8 @@ func mapError(err error) apiError {
 		return fromCode(crawler.CodeUnavailable)
 	case errors.Is(err, crawler.ErrUpstreamTimeout), errors.Is(err, context.DeadlineExceeded):
 		return fromCode(crawler.CodeTimeout)
+	case errors.Is(err, crawler.ErrHostNotFound):
+		return fromCode(crawler.CodeHostNotFound)
 	case errors.Is(err, crawler.ErrUpstream):
 		return fromCode(crawler.CodeUpstream)
 	case errors.Is(err, context.Canceled):
@@ -112,6 +114,8 @@ func fromCode(code string) apiError {
 	switch code {
 	case crawler.CodeTimeout:
 		return apiError{status: http.StatusGatewayTimeout, code: codeTimeout, message: "the upstream crawler timed out"}
+	case crawler.CodeHostNotFound:
+		return apiError{status: http.StatusUnprocessableEntity, code: crawler.CodeHostNotFound, message: "the domain does not resolve (no DNS record); check the URL"}
 	case crawler.CodeUnavailable:
 		return apiError{status: http.StatusServiceUnavailable, code: crawler.CodeUnavailable, message: "the upstream crawler is unavailable or refused this service's account; this is not a problem of the website", retryAfter: true}
 	case crawler.CodeRateLimited:

@@ -38,4 +38,4 @@ spec:
 #   - name: siteinfo-ratelimit
 #   - name: siteinfo-inflight
 #   - name: siteinfo-buffering
-# Ingress timeouts must stay LONGER than server.handler_timeout (45s), e.g. 60s.
+# Ingress timeouts must stay LONGER than server.handler_timeout (65s), e.g. 80s.

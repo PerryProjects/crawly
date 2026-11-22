@@ -150,9 +150,9 @@ func (c *Client) Scrape(ctx context.Context, url string, req ScrapeRequest) (*Pa
 		}
 		delay := c.backoff(attempt)
 		if retryAfter > delay {
-			delay = min(retryAfter, c.timeout)
+			delay = min(retryAfter, c.callTimeout(req))
 		}
-		if dl, ok := ctx.Deadline(); ok && time.Until(dl) < delay+c.timeout {
+		if dl, ok := ctx.Deadline(); ok && time.Until(dl) < delay+c.callTimeout(req) {
 			// A retry that the load deadline would cut short only burns credits and turns a
 			// classified (cacheable) error into an uncached deadline error.
 			return nil, err
@@ -179,7 +179,7 @@ func (c *Client) attempt(ctx context.Context, url string, opts *firecrawl.Scrape
 	callStart := time.Now()
 
 	box := &retryAfterBox{}
-	callCtx, cancel := context.WithTimeout(context.WithValue(ctx, retryAfterKey{}, box), c.timeout)
+	callCtx, cancel := context.WithTimeout(context.WithValue(ctx, retryAfterKey{}, box), c.callTimeout(req))
 	defer cancel()
 
 	doc, err := c.sc.Scrape(callCtx, url, opts)
@@ -191,6 +191,19 @@ func (c *Client) attempt(ctx context.Context, url string, opts *firecrawl.Scrape
 	tr.Add("crawler", "firecrawl call", "url", url, "attempt", n, "outcome", outcome, "duration", time.Since(callStart),
 		"queue_wait", waited, "formats", describeRequest(req), "retry_after", box.get(), "error", err)
 	return doc, box.get(), err
+}
+
+// siteErrorCode reports Firecrawl error codes that describe the target site (DNS, TLS, blocked,
+// all engines failed, ...) rather than Firecrawl itself. SCRAPE_TIMEOUT is handled as a timeout.
+func siteErrorCode(code string) bool {
+	return strings.HasPrefix(code, "SCRAPE_") && code != "SCRAPE_TIMEOUT"
+}
+
+func (c *Client) callTimeout(req ScrapeRequest) time.Duration {
+	if req.Timeout > 0 {
+		return req.Timeout
+	}
+	return c.timeout
 }
 
 func (c *Client) backoff(attempt int) time.Duration {
@@ -213,6 +226,9 @@ func (c *Client) options(req ScrapeRequest) *firecrawl.ScrapeOptions {
 	if req.FullPage {
 		opts.OnlyMainContent = firecrawl.Bool(false)
 	}
+	if req.WaitFor > 0 {
+		opts.WaitFor = firecrawl.Int(int(req.WaitFor.Milliseconds()))
+	}
 	if req.JSON != nil {
 		opts.JsonOptions = &firecrawl.JsonOptions{Prompt: req.JSON.Prompt, Schema: req.JSON.Schema}
 	}
@@ -220,7 +236,7 @@ func (c *Client) options(req ScrapeRequest) *firecrawl.ScrapeOptions {
 		opts.Location = &firecrawl.LocationConfig{Country: c.country, Languages: c.languages}
 	}
 	// Let Firecrawl give up slightly before our own per-call timeout fires.
-	opts.Timeout = firecrawl.Int(max(int(c.timeout.Milliseconds())*9/10, 1000))
+	opts.Timeout = firecrawl.Int(max(int(c.callTimeout(req).Milliseconds())*9/10, 1000))
 	return opts
 }
 
@@ -242,6 +258,12 @@ func classify(parent context.Context, err error) (outcome string, _ error) {
 		return "account_error", fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
 	case errors.As(err, &fe) && fe.StatusCode == http.StatusRequestTimeout:
 		return "timeout", fmt.Errorf("%w: %w", ErrUpstreamTimeout, err) // Firecrawl's own scrape timeout
+	case errors.As(err, &fe) && fe.ErrorCode == "SCRAPE_DNS_RESOLUTION_ERROR":
+		return "error", fmt.Errorf("%w: %w: %w", ErrHostNotFound, ErrUpstream, err)
+	case errors.As(err, &fe) && siteErrorCode(fe.ErrorCode):
+		// Firecrawl names a problem of the target (SCRAPE_SSL_ERROR came with HTTP 500, seen live on
+		// kern-ux.de with an expired certificate): a site failure, whatever the HTTP status.
+		return "error", fmt.Errorf("%w: %w", ErrUpstream, err)
 	case errors.As(err, &fe) && (fe.StatusCode >= 500 || fe.StatusCode == 0 && errors.Unwrap(fe) != nil):
 		// Firecrawl failing or unreachable: an outage, not a property of the site.
 		return "outage", fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
@@ -261,7 +283,7 @@ func retryable(err error) bool {
 		return true
 	}
 	var fe *firecrawl.FirecrawlError
-	if !errors.As(err, &fe) || fe.RequiresAction != nil {
+	if !errors.As(err, &fe) || fe.RequiresAction != nil || siteErrorCode(fe.ErrorCode) {
 		return false
 	}
 	switch {
@@ -352,7 +374,7 @@ func describeRequest(r ScrapeRequest) string {
 	for _, x := range []struct {
 		on   bool
 		name string
-	}{{r.Markdown, "markdown"}, {r.Links, "links"}, {r.Branding, "branding"}, {r.JSON != nil, "json"}, {r.FullPage, "full_page"}} {
+	}{{r.Markdown, "markdown"}, {r.Links, "links"}, {r.Branding, "branding"}, {r.JSON != nil, "json"}, {r.FullPage, "full_page"}, {r.WaitFor > 0, "wait_for"}} {
 		if x.on {
 			f = append(f, x.name)
 		}

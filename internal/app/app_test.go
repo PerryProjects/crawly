@@ -31,6 +31,7 @@ func TestClassify(t *testing.T) {
 	}{
 		{"not found", fmt.Errorf("x: %w", imprint.ErrNotFound), cache.Verdict{Status: cache.StatusNotFound, Code: "not_found"}},
 		{"upstream", fmt.Errorf("x: %w", crawler.ErrUpstream), cache.Verdict{Status: cache.StatusError, Code: "upstream_error"}},
+		{"host not found", fmt.Errorf("x: %w: %w", crawler.ErrHostNotFound, crawler.ErrUpstream), cache.Verdict{Status: cache.StatusError, Code: "host_not_found"}},
 		{"upstream timeout", fmt.Errorf("x: %w", crawler.ErrUpstreamTimeout), cache.Verdict{Status: cache.StatusError, Code: "upstream_timeout"}},
 		{"account problem is never cached", fmt.Errorf("x: %w", crawler.ErrUpstreamUnavailable), cache.Verdict{}},
 		{"rate limited is never cached", fmt.Errorf("x: %w", crawler.ErrRateLimited), cache.Verdict{}},

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"go.uber.org/zap"
@@ -28,6 +29,10 @@ const maxLinkedAttempts = 2
 var imprintMarkers = []string{
 	"impressum", "imprint", "legal notice", "anbieterkennung", "offenlegung",
 	"rechtliche hinweise", "angaben gemäß", "angaben gemaess", "medieninhaber", "mentions légales",
+	// Body phrases of an imprint, which footers do not contain. English imprint pages often have
+	// "Imprint" only in navigation links (seen live on gittibeauty.com).
+	"vertreten durch", "geschäftsführer", "handelsregister", "registergericht", "firmenbuch", "umsatzsteuer",
+	"represented by", "managing director", "register court", "commercial register", "vat id", "vat number",
 }
 
 // Service discovers and extracts the imprint of a host.
@@ -121,10 +126,28 @@ func (s *Service) lookupHost(ctx context.Context, host string, extraHosts []stri
 	tr.Add("imprint", "imprint link candidates (best first; the first two are tried)", "count", len(ranked), "top", top)
 	attempts := ranked[:min(len(ranked), maxLinkedAttempts)]
 
-	tried := map[string]bool{}
-	try := func(c Candidate) (*Imprint, error) {
-		tried[c.URL] = true
-		x, err := s.extractor.Extract(ctx, c.URL)
+	tried := map[string]bool{} // by dedupKey, so apex/www variants and redirects are fetched once
+	seen := func(raw string) bool {
+		u, err := url.Parse(raw)
+		return err == nil && tried[dedupKey(u)]
+	}
+	mark := func(raw string) {
+		if u, err := url.Parse(raw); err == nil {
+			tried[dedupKey(u)] = true
+		}
+	}
+	try := func(c Candidate, linked bool) (*Imprint, error) {
+		mark(c.URL)
+		x, err := s.extractor.Extract(ctx, c.URL, ExtractOptions{})
+		if err == nil && linked && unusableReason(x) == reasonNoMarker {
+			// The site itself links this page, so an empty-looking 200 is more likely content that
+			// JavaScript renders late than a soft 404 (seen live: aboutyou.de). One retry with a wait.
+			tr.Add("imprint", "linked page looks empty, retrying with a JavaScript render wait", "url", c.URL, "wait", renderWait)
+			x, err = s.extractor.Extract(ctx, c.URL, ExtractOptions{RenderWait: renderWait})
+		}
+		if err == nil {
+			mark(x.URL)
+		}
 		if err != nil {
 			tr.Add("imprint", "candidate scrape failed", "url", c.URL, "abort_lookup", hardFailure(err), "error", err)
 			if hardFailure(err) {
@@ -144,7 +167,7 @@ func (s *Service) lookupHost(ctx context.Context, host string, extraHosts []stri
 	}
 
 	for _, c := range attempts {
-		if imp, err := try(c); imp != nil || err != nil {
+		if imp, err := try(c, true); imp != nil || err != nil {
 			return imp, err
 		}
 	}
@@ -153,11 +176,11 @@ func (s *Service) lookupHost(ctx context.Context, host string, extraHosts []stri
 			break
 		}
 		c := Candidate{URL: "https://" + host + p}
-		if tried[c.URL] {
+		if seen(c.URL) {
 			continue
 		}
 		tr.Add("imprint", "trying well-known path", "url", c.URL)
-		if imp, err := try(c); imp != nil || err != nil {
+		if imp, err := try(c, false); imp != nil || err != nil {
 			return imp, err
 		}
 	}
@@ -198,16 +221,36 @@ func unusableReason(x Extraction) string {
 	// footer of a "page not found" page.
 	lower := strings.ToLower(mdLinkOrImage.ReplaceAllString(x.Text, " "))
 	if !slices.ContainsFunc(imprintMarkers, func(m string) bool { return strings.Contains(lower, m) }) {
-		return "no imprint marker word outside of links (soft 404?)"
+		return reasonNoMarker
 	}
 	return ""
 }
 
+const reasonNoMarker = "no imprint marker word outside of links (soft 404 or content rendered by JavaScript?)"
+
+// renderWait is how long a linked candidate that looked empty gets to render with JavaScript.
+const renderWait = 3 * time.Second
+
 // mdLinkOrImage matches markdown links and images, including their text.
 var mdLinkOrImage = regexp.MustCompile(`!?\[[^\]]*\]\([^)]*\)`)
 
+// canonicalImprintURL prefers the linked URL when the final URL only adds a query string on the
+// same path, e.g. a bot-protection token appended by a redirect (seen live on dfg.de: "?enodia=...").
+func canonicalImprintURL(final, linked string) string {
+	f, ferr := url.Parse(final)
+	l, lerr := url.Parse(linked)
+	if ferr != nil || lerr != nil || final == "" {
+		return linked
+	}
+	if l.RawQuery == "" && f.RawQuery != "" && hostKey(f.Hostname()) == hostKey(l.Hostname()) &&
+		strings.TrimSuffix(f.Path, "/") == strings.TrimSuffix(l.Path, "/") {
+		return linked
+	}
+	return final
+}
+
 func build(x Extraction, c Candidate, hosts []string) *Imprint {
-	imp := &Imprint{ImprintURL: x.URL, Fields: x.Fields, Text: x.Text}
+	imp := &Imprint{ImprintURL: canonicalImprintURL(x.URL, c.URL), Fields: x.Fields, Text: x.Text}
 	var truncated bool
 	imp.Text, truncated = truncateUTF8(imp.Text, maxTextBytes)
 	if imp.ImprintURL == "" {
