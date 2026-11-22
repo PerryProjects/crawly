@@ -12,6 +12,7 @@ const testToken = "0123456789abcdef-token"
 
 func TestLoadDefaultsAndEnv(t *testing.T) {
 	t.Setenv("SITEINFO_AUTH_TOKENS", testToken+", second-token-0123456789")
+	t.Setenv("SITEINFO_FIRECRAWL_API_KEY", "fc-test")
 	t.Setenv("SITEINFO_CACHE_TTL_IMPRINT_OK", "48h")
 	t.Setenv("SITEINFO_REDIS_MODE", "single")
 	t.Setenv("SITEINFO_REDIS_ADDRS", "redis:6379")
@@ -45,6 +46,7 @@ func TestLoadFileThenEnvWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("SITEINFO_SERVER_ADDR", ":7777")
+	t.Setenv("SITEINFO_FIRECRAWL_API_URL", "http://firecrawl.internal:3002")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
@@ -61,6 +63,7 @@ func TestValidate(t *testing.T) {
 	valid := func() Config {
 		c := Default()
 		c.Auth.Tokens = []string{testToken}
+		c.Firecrawl.APIKey = "fc-test"
 		return c
 	}
 	tests := []struct {
@@ -78,6 +81,8 @@ func TestValidate(t *testing.T) {
 		{"handler >= lock expiry", func(c *Config) { c.Cache.LockMargin = time.Second }, "lock expiry"},
 		{"write <= handler", func(c *Config) { c.Server.WriteTimeout = 45 * time.Second }, "write_timeout"},
 		{"zero ttl", func(c *Config) { c.Cache.TTL.Error = 0 }, "cache.ttl.error"},
+		{"no api key for cloud", func(c *Config) { c.Firecrawl.APIKey = "" }, "firecrawl.api_key"},
+		{"no api key for self-hosted", func(c *Config) { c.Firecrawl.APIKey = ""; c.Firecrawl.APIURL = "http://fc:3002" }, ""},
 		{"bad env", func(c *Config) { c.Env = "staging" }, "env must"},
 	}
 	for _, tt := range tests {

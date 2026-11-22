@@ -82,7 +82,8 @@ func serve[T any](s *Server, c *echo.Context, kind cache.Kind, notFound error,
 	res, err := cache.GetOrLoad(ctx, s.loader, cache.Key{Kind: kind, Host: host}, cache.LoadOptions{Refresh: refresh}, func(ctx context.Context) (T, error) {
 		return lookup(ctx, host)
 	})
-	if err != nil {
+	// Negative "error" entries (cached or just loaded) come back with an error but a status.
+	if err != nil && res.Status != cache.StatusError {
 		return err
 	}
 
@@ -92,6 +93,9 @@ func serve[T any](s *Server, c *echo.Context, kind cache.Kind, notFound error,
 	}
 	c.Response().Header().Set(headerCache, outcome)
 	c.Set(ctxCache, outcome)
+	if err != nil {
+		return err
+	}
 	if res.RefreshThrottled {
 		c.Response().Header().Set(headerCacheRefresh, "cooldown")
 	}

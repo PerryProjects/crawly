@@ -237,6 +237,9 @@ func (c *Config) Validate() error {
 	if c.Redis.Mode == "cluster" && c.Redis.DB != 0 {
 		add("redis.db must be 0 in cluster mode")
 	}
+	if c.Firecrawl.APIKey == "" && c.Firecrawl.APIURL == Default().Firecrawl.APIURL {
+		add("firecrawl.api_key is required for the Firecrawl cloud API (a self-hosted firecrawl.api_url may run without)")
+	}
 	if c.Firecrawl.MaxConcurrency < 1 {
 		add("firecrawl.max_concurrency must be >= 1")
 	}
