@@ -524,6 +524,26 @@ Observed later: a burst of six lookups exhausted the test account's Firecrawl ra
 `upstream_rate_limited` without caching anything, and the same lookups succeeded a minute later. With several pods,
 the per-pod `firecrawl.max_concurrency` multiplies: size it so that `pods × max_concurrency` fits the Firecrawl plan.
 
+### 70-domain sweep (2026-11-22)
+
+Imprint and brand were requested for 70 DACH sites (D2C brands, large shops, brand portals and corporate sites), each from
+an empty cache, then the failing ones again after fixes. Final state: **67/70 imprints and 67/70 brands**; the three
+remaining failures are correct answers about the site (`juniperjack.de` has no DNS record → 422 `host_not_found`;
+`kern-ux.de` and `frontify.ch` serve expired TLS certificates → 502 `upstream_error`, not retried). Typical latency from
+an empty cache: imprint median ≈ 14 s (p90 ≈ 20 s), brand median ≈ 10 s; about 12 Firecrawl credits per site for both.
+
+Bugs the sweep found and that are fixed: English imprints without the word "Impressum" outside links (gittibeauty.com);
+imprint content rendered by JavaScript (aboutyou.de, retried with a render wait); an agency's imprint link outranking the
+site's own (kessberlin.de); branding scrapes needing ~30 s on large shops (mediamarkt.de, hornbach.de, naturtreu.de);
+Firecrawl answering HTTP 500 with `SCRAPE_SSL_ERROR` (was treated as an outage); identifier spellings such as
+"HR B 59603", "HRB 114 439", "HRB-Nr. 730623", two VAT IDs in one line, "Firmenbuchnummer: 42354k", a Swiss UID as
+register number, a generic "Handelsregister" type; Cloudflare-protected e-mails; phone numbers written as
+"(+49) 0711 …"; redirect tokens in the imprint URL (dfg.de).
+
+Known limits seen in the sweep: on `oebb.at` and `bosch.com` the address is not in the page text Firecrawl returns (also
+not with a render wait), so it is reported as `missing`; `blackroll.com` lists two protected e-mail addresses, so none is
+picked; country mismatches (a Swiss AG with a German VAT ID) are reported, not "fixed".
+
 ## How to extend
 
 - **Async mode.** Handlers depend on `cache.Loader` (`Load(ctx, key, fetch, opts) (Entry, error)`). Implement it
